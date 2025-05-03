@@ -6,9 +6,9 @@ This repository contains various Colab notebooks created to test, explore, and s
 
 | Title | Description | Colab Link |
 |-------|-------------|------------|
-| **DNN + Netron** | Simple deep neural net setup and visualization using [Netron](https://netron.app) | [Open in Colab](notebooks/netron-dnn-visualization.ipynb) |
-| **AI ACT Chatbot** | Building a chatbot to interact with `ai.act` logic | [Open in Colab](notebooks/ai-act-chatbot.ipynb) |
-| **Additive Neural Network** | PyTorch implementation of additive NN paper | [Open in Colab](notebooks/additive-network-pytorch.ipynb) |
+| **DNN + Netron** | Simple deep neural net setup and visualization using [Netron](https://netron.app) | [Open](notebooks/netron-dnn-visualization.ipynb) |
+| **AI ACT Chatbot** | Building a chatbot to interact with `ai.act` logic | [Open](notebooks/ai-act-chatbot.ipynb) |
+| **Additive Neural Network** | PyTorch implementation of additive NN paper | [Open](notebooks/additive-network-pytorch.ipynb) |
 
 ## 🧠 Goals
 
