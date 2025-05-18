@@ -1,3 +1,23 @@
+"""
+setup_mlflow.py
+
+This script sets up the MLflow environment for experiment tracking. It ensures that the necessary
+folders and database files are created, and starts the MLflow server for tracking experiments.
+
+Usage:
+    python setup_mlflow.py
+
+Attributes:
+    EXPERIMENT_NAME (str): The name of the MLflow experiment.
+    MLFLOW_FOLDER (str): The path to the MLflow folder.
+    MLFLOW_DB_PATH (str): The path to the MLflow SQLite database file.
+    ARTIFACT_ROOT (str): The root directory for MLflow artifacts.
+    TRACKING_URI (str): The URI for the MLflow tracking server.
+
+Functions:
+    main(): Sets up the MLflow environment and starts the MLflow server.
+"""
+
 import os
 import mlflow
 import subprocess
@@ -28,6 +48,18 @@ if os.path.exists(MLFLOW_DB_PATH):
     os.remove(MLFLOW_DB_PATH)
 
 def main():
+    """
+    Sets up the MLflow environment and starts the MLflow server.
+
+    This function performs the following steps:
+    1. Configures the MLflow tracking URI.
+    2. Creates the MLflow experiment if it does not already exist.
+    3. Deletes existing MLflow database and artifact directories if they exist.
+    4. Starts the MLflow server as a subprocess.
+
+    Returns:
+        None
+    """
     logging.info(f"Setting MLflow tracking URI to: {TRACKING_URI}")
     mlflow.set_tracking_uri(TRACKING_URI)
     exp = mlflow.get_experiment_by_name(EXPERIMENT_NAME)

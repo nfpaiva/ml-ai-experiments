@@ -1,3 +1,24 @@
+"""
+train_pipeline.py
+
+This script orchestrates the training pipeline for machine learning models. It includes data loading,
+preprocessing, model training, hyperparameter optimization, and model evaluation. The results are
+logged in MLflow for experiment tracking and reproducibility.
+
+Usage:
+    python train_pipeline.py --train-month YYYY-MM --val-month YYYY-MM --test-month YYYY-MM
+
+Arguments:
+    --train-month (str): The month for the training dataset in the format YYYY-MM.
+    --val-month (str): The month for the validation dataset in the format YYYY-MM.
+    --test-month (str): The month for the test dataset in the format YYYY-MM.
+    --num-trials (int, optional): Number of trials for hyperparameter optimization. Default is 1.
+    --flag-reset-mlflow (str, optional): Whether to reset the MLflow database. Options are 'Y' or 'N'. Default is 'N'.
+
+Functions:
+    run_optimization(): Runs hyperparameter optimization using Optuna.
+"""
+
 """train_pipeline.py """
 import argparse
 import datetime
@@ -51,11 +72,11 @@ def run_optimization(
     """Run the hyperparameter optimization using Optuna.
 
     Args:
+        file_names (Dict[str, Dict[str, str]]): Dictionary containing file paths for datasets.
         dataset_split_opt (DatasetSplit): A data class containing the split datasets and labels.
-        client (MlflowClient): MLflow tracking self.client_mlflow.
-        experiment (mlflow.entities.Experiment): MLflow experiment.
+        mlflow_exp_obj (MlFlowExperimentRegistry): MLflow experiment registry object.
         num_trials (int): Number of hyperparameter optimization trials.
-        pipeline_opt (Pipeline): pipeline for the model.
+        pipeline_opt (Pipeline): Scikit-learn pipeline for the model.
 
     Returns:
         None
@@ -78,6 +99,20 @@ def run_optimization(
     hpo_run_id = mlflow_exp_obj.get_max_hpo_run_id()
 
     def objective(trial) -> float:
+        """
+        Objective function for Optuna hyperparameter optimization.
+
+        Args:
+            trial (optuna.trial.Trial): A single trial object for suggesting hyperparameters.
+
+        Returns:
+            float: The F1 score on the validation dataset, used as the optimization metric.
+
+        This function defines the hyperparameters for the ExplainableBoostingClassifier,
+        trains the model, evaluates it on the validation dataset, and logs the results
+        to MLflow.
+        """
+
         # Define hyperparameters for ExplainableBoostingClassifier
         params = {
             "max_bins": trial.suggest_int("max_bins", 8, 16),

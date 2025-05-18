@@ -133,21 +133,16 @@ class MlFlowContext:
         This method deletes the existing MLflow tracking database file and removes the
         directory containing the MLflow run data, effectively resetting the MLflow environment.
 
-        Args:
-            None
-
         Returns:
             None
         """
-
         # Remove existing mlflow.db file
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
 
+        # Remove existing mlruns folder
         directory_path = "./mlruns/"
-        # Remove existing mlrun folder
         if os.path.exists(directory_path) and os.path.isdir(directory_path):
-            # Remove the directory and its contents
             shutil.rmtree(directory_path)
 
     def setup_mlflow(self) -> Tuple[Experiment, mlflow.tracking.MlflowClient]:
@@ -181,24 +176,18 @@ class MlFlowContext:
         If reset is not required, it tries to retrieve an existing experiment with the
         given name. If the experiment is not found, a NoExperimentFound exception is raised.
 
-        Args:
-            None
-
         Returns:
             Experiment: The MLflow Experiment instance associated with the experiment name.
 
         Raises:
             NoExperimentFound: If the experiment with the given name does not exist.
         """
-
         if self.flag_reset_mlflow == "Y":
-            self.experiment = mlflow.set_experiment(self.hpo_experiment_name)
+            self.experiment = mlflow.create_experiment(self.hpo_experiment_name)
         else:
             self.experiment = mlflow.get_experiment_by_name(self.hpo_experiment_name)
-            if self.experiment is None:
-                raise NoExperimentFound(
-                    f"No experiment found with name {self.hpo_experiment_name}."
-                )
+            if not self.experiment:
+                raise NoExperimentFound(f"Experiment '{self.hpo_experiment_name}' not found.")
         return self.experiment
 
 
@@ -360,21 +349,14 @@ class MlFlowModelManager:
 
         Returns:
             Optional[model_registry.ModelVersion]: The ModelVersion instance representing the
-            production version,
-                or None if no production version exists.
+            production version, or None if no production version exists.
         """
         try:
-            model_versions = self.client_mlflow.get_latest_versions(
+            versions = self.client_mlflow.get_latest_versions(
                 registered_model_name, stages=["Production"]
             )
-            if model_versions:
-                production_version = model_versions[0].version
-                model_version_details = self.client_mlflow.get_model_version(
-                    registered_model_name, production_version
-                )
-                return model_version_details
-            return None
-        except mlflow.exceptions.MlflowException:
+            return versions[0] if versions else None
+        except MlflowException:
             return None
 
     def calc_f1_champion_challenger_model(
@@ -419,42 +401,31 @@ class MlFlowModelManager:
         production_version_details: model_registry.ModelVersion,
     ) -> None:
         """
-        Handle the scenario where the best challenger model outperforms the
-        production champion model.
+        Handle the transition when the challenger model outperforms the production model.
+
+        This method archives the current production model and promotes the challenger model
+        to the production stage in the MLflow model registry.
 
         Args:
-            hpo_champion_model (str): The name of the production champion model.
-            best_model_uri (str): URI of the best challenger model from the last HPO run.
+            hpo_champion_model (str): Name of the challenger model.
+            best_model_uri (str): URI of the challenger model.
             production_version_details (model_registry.ModelVersion): Details of the current
-            production version.
+                production model version.
 
         Returns:
             None
         """
-
-        # Transition the production model to archived
+        # Archive the current production model
         self.client_mlflow.transition_model_version_stage(
             name=hpo_champion_model,
             version=production_version_details.version,
             stage="Archived",
         )
 
-        # Register the challenger model if not already registered
-        registered_versions = self.client_mlflow.get_latest_versions(hpo_champion_model)
-        challenger_version = None
-        for version in registered_versions:
-            if version.source == best_model_uri:
-                challenger_version = version.version
-                break
-
-        if not challenger_version:
-            registered_model = mlflow.register_model(best_model_uri, hpo_champion_model)
-            challenger_version = registered_model.version
-
         # Promote the challenger model to production
         self.client_mlflow.transition_model_version_stage(
             name=hpo_champion_model,
-            version=challenger_version,
+            version=best_model_uri,
             stage="Production",
         )
 
