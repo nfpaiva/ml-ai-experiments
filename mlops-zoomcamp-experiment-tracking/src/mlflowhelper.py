@@ -15,7 +15,7 @@ Classes:
     - MlFlowModelManager: Manages model-related queries, calculations, and transitions.
 
 Functions:
-    - compare_models: Compares production and best model RMSE values.
+    - compare_models: Compares production and best model F1 score values.
     - handle_challenger_wins: Handles model version transitions when the challenger wins.
 
 Usage:
@@ -39,8 +39,9 @@ import mlflow
 from mlflow.tracking import MlflowClient  # type: ignore
 from mlflow.entities import Run, model_registry  # type: ignore
 from mlflow.entities.experiment import Experiment  # type: ignore
+from mlflow.exceptions import MlflowException # type: ignore
 
-from sklearn.metrics import mean_squared_error  # type: ignore
+from sklearn.metrics import f1_score  # Import f1_score for classification
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -164,9 +165,10 @@ class MlFlowContext:
             Tuple containing the MLflow Experiment and MlflowClient instances.
         """
 
-        database_uri = f"sqlite:///{self.db_path}"
-        mlflow.set_tracking_uri(database_uri)
-        self.client_mlflow = MlflowClient(tracking_uri=database_uri)
+        # Force MLflow to use the specified artifact root
+        mlflow.set_tracking_uri(f"sqlite:///{self.db_path}")
+        mlflow.set_experiment(self.hpo_experiment_name)
+        self.client_mlflow = MlflowClient(tracking_uri=f"sqlite:///{self.db_path}")
 
         return self.client_mlflow
 
@@ -279,7 +281,7 @@ class MlFlowModelManager:
     Helper class to manage models, promote models to production, and compare models using MLflow.
 
     This class provides methods to manage models produced through hyperparameter optimization (HPO)
-    runs, promote models to production, and compare different models using RMSE values.
+    runs, promote models to production, and compare different models using F1 score values.
 
     Args:
         mlflow_context (MlFlowContext): An instance of the MlFlowContext class providing
@@ -307,8 +309,8 @@ class MlFlowModelManager:
         Retrieve the best model from the last hyperparameter optimization (HPO) run.
 
         This method searches for all runs within the experiment and identifies the best model
-        produced by the latest HPO run based on the RMSE metric. The best model is determined
-        by comparing RMSE values of different runs.
+        produced by the latest HPO run based on the F1 score. The best model is determined
+        by comparing F1 scores of different runs.
 
         Returns:
             Run: The Run object representing the best model from the last HPO run.
@@ -328,16 +330,16 @@ class MlFlowModelManager:
         ]
         max_hpo_run_id = max(existing_hpo_run_ids) if existing_hpo_run_ids else 0
 
-        # Retrieve the best model run based on the maximum hpo_run_id and test set RMSE
+        # Retrieve the best model run based on the maximum hpo_run_id and test set F1 score
         # The first run in the list is the best run by default
         best_run = existing_runs[0]
-        best_rmse = float("inf")
+        best_f1 = float("-inf")
         for run in existing_runs:
             hpo_run_id = int(run.data.tags.get("hpo_run_id", 0))
             if hpo_run_id == max_hpo_run_id:
-                rmse_test = run.data.metrics.get("RMSE_Test")
-                if rmse_test is not None and rmse_test < best_rmse:
-                    best_rmse = rmse_test
+                f1_test = run.data.metrics.get("F1_Test")
+                if f1_test is not None and f1_test > best_f1:
+                    best_f1 = f1_test
                     best_run = run
 
         return best_run
@@ -375,56 +377,40 @@ class MlFlowModelManager:
         except mlflow.exceptions.MlflowException:
             return None
 
-    def calc_rmse_champion_challenger_model(
+    def calc_f1_champion_challenger_model(
         self,
         hpo_champion_model: str,
-        x_test_reg: pd.DataFrame,
-        y_test_reg: Union[np.ndarray, pd.Series],
+        x_test: pd.DataFrame,
+        y_test: Union[np.ndarray, pd.Series],
         best_model_uri: str,
         best_run: mlflow.entities.Run,
         production_pipeline: mlflow.pyfunc.PythonModel,
     ) -> Tuple[float, float]:
         """
-        Calculate RMSE values for the production champion model and the best challenger model.
+        Calculate the F1 score for the champion and challenger models.
 
         Args:
-            hpo_champion_model (str): The name of the production champion model.
-            x_test_reg (pd.DataFrame): Test feature data for model evaluation.
-            y_test_reg (Union[np.ndarray, pd.Series]): True labels for model evaluation.
-            best_model_uri (str): URI of the best challenger model from the last HPO run.
-            best_run (mlflow.entities.Run): The Run object representing the
-            best challenger model's run.
-            production_pipeline (mlflow.pyfunc.PythonModel): The production champion
-            model's pipeline.
+            hpo_champion_model (str): Name of the HPO champion model.
+            x_test (pd.DataFrame): Test features.
+            y_test (Union[np.ndarray, pd.Series]): Test labels.
+            best_model_uri (str): URI of the best model.
+            best_run (mlflow.entities.Run): Best run object.
+            production_pipeline (mlflow.pyfunc.PythonModel): Production model pipeline.
 
         Returns:
-            Tuple[float, float]: A tuple containing the RMSE values for the production
-            champion model and
-                the best challenger model.
+            Tuple[float, float]: F1 scores for the production and challenger models.
         """
+        # Load the production model
+        production_model = production_pipeline
+        y_pred_production = production_model.predict(x_test)
+        f1_production = f1_score(y_test, y_pred_production)
 
-        y_pred_production = production_pipeline.predict(
-            x_test_reg.to_dict(orient="records")
-        )
-        rmse_production = mean_squared_error(
-            y_test_reg, y_pred_production, squared=False
-        )
+        # Load the challenger model
+        challenger_model = mlflow.pyfunc.load_model(best_model_uri)
+        y_pred_challenger = challenger_model.predict(x_test)
+        f1_challenger = f1_score(y_test, y_pred_challenger)
 
-        logger.info("RMSE for the production - champion - model: %s", rmse_production)
-
-        # Calculate RMSE for the best model from the last run
-        best_pipeline = mlflow.sklearn.load_model(best_model_uri)
-        if not best_pipeline:
-            raise NoModelsFound(
-                f"No best model found for {hpo_champion_model} in run {best_run.info.run_id}"
-            )
-        y_pred_best = best_pipeline.predict(x_test_reg.to_dict(orient="records"))
-        rmse_best = mean_squared_error(y_test_reg, y_pred_best, squared=False)
-
-        logger.info(
-            "RMSE for the best model - challenger - from the last run: %s", rmse_best
-        )
-        return rmse_production, rmse_best
+        return f1_production, f1_challenger
 
     def handle_challenger_wins(
         self,
@@ -446,21 +432,26 @@ class MlFlowModelManager:
             None
         """
 
+        # Transition the production model to archived
         self.client_mlflow.transition_model_version_stage(
             name=hpo_champion_model,
             version=production_version_details.version,
             stage="Archived",
         )
-        mlflow.register_model(model_uri=best_model_uri, name=hpo_champion_model)
-        version = (
-            self.client_mlflow.get_latest_versions(hpo_champion_model, stages=None)[
-                0
-            ].version
-            + 1
-        )
+
+        # Promote the challenger model to production
+        latest_versions = self.client_mlflow.get_latest_versions(hpo_champion_model)
+        if not latest_versions:
+            raise MlflowException(f"No registered versions found for model {hpo_champion_model}")
+
+        latest_version = latest_versions[0].version
+
         self.client_mlflow.transition_model_version_stage(
-            hpo_champion_model, version=str(version), stage="Production"
+            name=hpo_champion_model,
+            version=latest_version,
+            stage="Production",
         )
+
         logger.info(
             "The best model from the last run put into production "
             "and the current model in production archived."
@@ -503,7 +494,7 @@ class MlFlowModelManager:
                 raise NoModelsFound(
                     f"No production model found for {hpo_champion_model}"
                 )
-            rmse_production, rmse_best = self.calc_rmse_champion_challenger_model(
+            f1_production, f1_best = self.calc_f1_champion_challenger_model(
                 hpo_champion_model,
                 x_test_reg,
                 y_test_reg,
@@ -511,8 +502,8 @@ class MlFlowModelManager:
                 best_run,
                 production_pipeline,
             )
-            # Compare RMSE values and promote the best model if needed
-            if rmse_production > rmse_best:
+            # Compare F1 scores and promote the best model if needed
+            if f1_production < f1_best:
                 # Promote the best model from the last run to production
                 # Archive the existing production model version
 
@@ -531,10 +522,10 @@ class MlFlowModelManager:
             # Add a custom tag to the best model URI to indicate the outcome of the comparison
             custom_tag = {
                 "comparison_outcome": "better_than_production"
-                if rmse_best < rmse_production
+                if f1_best < f1_production
                 else "not_better_than_production",
                 "production_model_uri": str(production_version_details.run_id),
-                "test_rmse": str(rmse_best),
+                "test_f1": str(f1_best),
             }
 
             for key, value in custom_tag.items():
@@ -545,7 +536,14 @@ class MlFlowModelManager:
                 "No model exists in production. The best model from the "
                 "last run will be put into production."
             )
-            mlflow.register_model(model_uri=best_model_uri, name=hpo_champion_model)
+            mlflow.register_model(best_model_uri, hpo_champion_model)
+
+            latest_versions = self.client_mlflow.get_latest_versions(hpo_champion_model)
+            if not latest_versions:
+                raise MlflowException(f"No versions found after registering model {hpo_champion_model}")
+
+            new_version = latest_versions[0].version
+
             self.client_mlflow.transition_model_version_stage(
-                name=hpo_champion_model, version="1", stage="Production"
+                name=hpo_champion_model, version=new_version, stage="Production"
             )

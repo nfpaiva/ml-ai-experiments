@@ -2,8 +2,12 @@ import os
 import pickle
 import click
 import pandas as pd
+import logging
 
 from sklearn.feature_extraction import DictVectorizer
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def dump_pickle(obj, filename: str):
@@ -25,14 +29,23 @@ def read_dataframe(filename: str):
 
 
 def preprocess(df: pd.DataFrame, dv: DictVectorizer, fit_dv: bool = False):
+    logger.info("First 5 rows of input DataFrame to preprocess:\n%s", df.head())
     df['PU_DO'] = df['PULocationID'] + '_' + df['DOLocationID']
+    logger.info(f"Number of unique PU_DO pairs: {df['PU_DO'].nunique()}")
+    logger.info(f"First 10 unique PU_DO pairs: {df['PU_DO'].unique()[:10]}")
     categorical = ['PU_DO']
     numerical = ['trip_distance']
-    dicts = df[categorical + numerical].to_dict(orient='records')
+    # Ensure target is not in features
+    features = categorical + numerical
+    if 'tip_amount' in features:
+        features.remove('tip_amount')
+    dicts = df[features].to_dict(orient='records')
     if fit_dv:
         X = dv.fit_transform(dicts)
     else:
         X = dv.transform(dicts)
+    logger.info("First 5 rows of vectorized X:\n%s", X[:5])
+    logger.info(f"Vectorized X shape: {X.shape}")
     return X, dv
 
 

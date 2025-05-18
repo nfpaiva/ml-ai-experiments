@@ -102,41 +102,64 @@ class DataHandler:
         suitability for downstream tasks. It calculates the duration of each trip, filters out
         rows with unrealistic durations, and creates a concatenated feature representing the
         pickup and dropoff locations. Additionally, it converts specific columns to string
-        data type for categorical analysis.
+        data type for categorical analysis. It also adds features for pickup hour, pickup weekday,
+        and trip duration in minutes.
 
         Args:
             dataset (pd.DataFrame): The input dataset containing raw trip data.
 
         Returns:
             pd.DataFrame: A preprocessed dataset with added features and filtered rows.
-
-        Example:
-            # Load a raw dataset
-            raw_dataset = pd.read_parquet("raw_dataset.parquet")
-
-            # Create a DataHandler object
-            handler = DataHandler(data_dir=Path("data/"), s3_url="https://s3.example.com/")
-
-            # Preprocess the raw dataset
-            preprocessed_dataset = handler.preprocess_dataset(raw_dataset)
         """
 
-        dataset["duration"] = (
+        # Drop rows with essential missing values
+        dataset = dataset.dropna(subset=[
+            "payment_type", "fare_amount", "trip_distance",
+            "lpep_pickup_datetime", "lpep_dropoff_datetime"
+        ])
+
+        # Target: is the trip marked as cash?
+        dataset["is_cash_payment"] = (dataset["payment_type"] == 2).astype(int)
+
+        # Feature engineering
+        dataset["pickup_hour"] = dataset["lpep_pickup_datetime"].dt.hour
+        dataset["pickup_weekday"] = dataset["lpep_pickup_datetime"].dt.weekday
+        dataset["trip_duration_minutes"] = (
             dataset["lpep_dropoff_datetime"] - dataset["lpep_pickup_datetime"]
         ).dt.total_seconds() / 60
-        filtered_dataset = dataset[
-            (dataset.duration >= 1) & (dataset.duration <= 60)
-        ].copy()
-        str_columns = ["PULocationID", "DOLocationID"]
-        filtered_dataset.loc[:, str_columns] = filtered_dataset[str_columns].astype(str)
-        filtered_dataset.loc[:, "PU_DO"] = (
-            filtered_dataset["PULocationID"] + "_" + filtered_dataset["DOLocationID"]
-        )
-        filtered_dataset.loc[:, "PU_DO"] = filtered_dataset["PU_DO"].astype(str)
-        categorical = ["PU_DO"]
-        numerical = ["trip_distance", "tip_amount"]
 
-        return filtered_dataset[categorical + numerical]
+        # Remove invalid trips
+        dataset = dataset[
+            (dataset["fare_amount"] > 0) &
+            (dataset["trip_distance"] > 0) &
+            (dataset["trip_duration_minutes"] > 0)
+        ]
+
+        # Final feature set (post-trip only, no leakage)
+        features = [
+            "fare_amount", "trip_distance", "passenger_count",
+            "pickup_hour", "pickup_weekday", "trip_duration_minutes",
+            "RatecodeID", "VendorID", "trip_type",
+            "PULocationID", "DOLocationID",
+            "congestion_surcharge", "extra", "tolls_amount",
+            "mta_tax", "improvement_surcharge"
+        ]
+
+        dataset = dataset[features + ["is_cash_payment"]]
+
+        # Fill & cast
+        dataset["RatecodeID"] = dataset["RatecodeID"].fillna(1).astype(int)
+        dataset["VendorID"] = dataset["VendorID"].fillna(1).astype(int)
+        dataset["trip_type"] = dataset["trip_type"].fillna(1).astype(int)
+        dataset["PULocationID"] = dataset["PULocationID"].fillna(0).astype(int)
+        dataset["DOLocationID"] = dataset["DOLocationID"].fillna(0).astype(int)
+        dataset["congestion_surcharge"] = dataset["congestion_surcharge"].fillna(0)
+        dataset["extra"] = dataset["extra"].fillna(0)
+        dataset["tolls_amount"] = dataset["tolls_amount"].fillna(0)
+        dataset["mta_tax"] = dataset["mta_tax"].fillna(0)
+        dataset["improvement_surcharge"] = dataset["improvement_surcharge"].fillna(0)
+
+        return dataset
 
     def load_dataset(
         self, file_names_load: Dict[str, Dict[str, str]]
@@ -178,13 +201,14 @@ class DataHandler:
             for dataset in file_names.keys()
         }
 
-        x_train_inner = df_data_processed["train"]
-        x_val_inner = df_data_processed["val"]
-        x_test_inner = df_data_processed["test"]
+        x_train_inner = df_data_processed["train"].drop(columns=["is_cash_payment"])
+        x_val_inner = df_data_processed["val"].drop(columns=["is_cash_payment"])
+        x_test_inner = df_data_processed["test"].drop(columns=["is_cash_payment"])
 
-        y_train_inner = df_data_processed["train"]["tip_amount"]
-        y_val_inner = df_data_processed["val"]["tip_amount"]
-        y_test_inner = df_data_processed["test"]["tip_amount"]
+
+        y_train_inner = df_data_processed["train"]["is_cash_payment"]
+        y_val_inner = df_data_processed["val"]["is_cash_payment"]
+        y_test_inner = df_data_processed["test"]["is_cash_payment"]
 
         return DatasetSplit(
             x_train_inner,

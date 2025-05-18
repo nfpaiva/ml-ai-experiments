@@ -1,0 +1,7 @@
+constants:
+  S3_URL: "https://d37ci6vzurychx.cloudfront.net/trip-data/"
+  DATA_DIR: "data"
+  PREFIX: "green_tripdata_"
+  HPO_EXPERIMENT_NAME: "mlops-zoomcamp-hpo-experiment"
+  HPO_BEST_MODEL: "mlops-zoomcamp-best-model"
+  HPO_CHAMPION_MODEL: "mlops-zoomcamp-champion-model"

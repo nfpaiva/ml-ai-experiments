@@ -12,9 +12,8 @@ import yaml
 import optuna
 import mlflow  # type: ignore
 from optuna.samplers import TPESampler
-from sklearn.ensemble import RandomForestRegressor  # type: ignore
-from sklearn.feature_extraction import DictVectorizer  # type: ignore
-from sklearn.metrics import mean_squared_error  # type: ignore
+from interpret.glassbox import ExplainableBoostingClassifier
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.pipeline import Pipeline  # type: ignore
 
 from datasetsplit import DatasetSplit
@@ -40,7 +39,7 @@ def run_optimization(
         client (MlflowClient): MLflow tracking self.client_mlflow.
         experiment (mlflow.entities.Experiment): MLflow experiment.
         num_trials (int): Number of hyperparameter optimization trials.
-        pipeline_opt (Pipeline): Sklearn pipeline for the model.
+        pipeline_opt (Pipeline): pipeline for the model.
 
     Returns:
         None
@@ -59,84 +58,57 @@ def run_optimization(
         dataset_split_opt.y_test,
     )
 
-    # Fit the preprocessor on the training data only
-    # once to speed up training (instead of fitting the whole pipeline for each train iteration)
-    # # Perhaps this can be achieved with caching option (?)
-    pipeline_opt.named_steps["preprocessor"].fit(
-        x_train_opt.to_dict(orient="records"), y_train_opt
-    )
-
-    # # Preprocess the training data
-    x_train_preproc = pipeline_opt.named_steps["preprocessor"].transform(
-        x_train_opt.to_dict(orient="records")
-    )
-
     # Build HPO Run id
     hpo_run_id = mlflow_exp_obj.get_max_hpo_run_id()
 
     def objective(trial) -> float:
+        # Define hyperparameters for ExplainableBoostingClassifier
         params = {
-            "random_forest__n_estimators": trial.suggest_int("n_estimators", 10, 50, 1),
-            "random_forest__max_depth": trial.suggest_int("max_depth", 1, 20, 1),
-            "random_forest__min_samples_split": trial.suggest_int(
-                "min_samples_split", 2, 10, 1
-            ),
-            "random_forest__min_samples_leaf": trial.suggest_int(
-                "min_samples_leaf", 1, 4, 1
-            ),
-            "random_forest__random_state": 42,
-            "random_forest__n_jobs": -1,
+            "max_bins": trial.suggest_int("max_bins", 32, 64),
+            "max_interaction_bins": trial.suggest_int("max_interaction_bins", 32, 64),
+            "interactions": trial.suggest_int("interactions", 0, 1),
         }
 
-        # Update the hyperparameters of the model in the pipeline
-        pipeline_opt.set_params(**params)
-
-        with mlflow.start_run():
-            # Customized run name based on model name and parameters
+        with mlflow.start_run(experiment_id=mlflow_exp_obj.experiment.experiment_id):
+            # Log run metadata
             params_str = "_".join(
                 [f"{param}={value}" for param, value in params.items()]
             )
             timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
             run_name = f"{params_str}_{timestamp}"
             mlflow.set_tag("mlflow.runName", run_name)
-
             mlflow.set_tag("developer", "nfpaiva")
-
             mlflow.set_tag("hpo_run_id", str(hpo_run_id))
-
             mlflow.log_params(params)
 
-            # Train the model part of the pipeline with the preprocessed data
-            pipeline_opt.named_steps["random_forest"].fit(x_train_preproc, y_train_opt)
+            # Update pipeline with hyperparameters
+            pipeline_opt.set_params(ebm__max_bins=params["max_bins"], ebm__max_interaction_bins=params["max_interaction_bins"], ebm__interactions=params["interactions"])
 
-            y_pred_val = pipeline_opt.predict(x_val_opt.to_dict(orient="records"))
-            rmse_val: float = mean_squared_error(y_val_opt, y_pred_val, squared=False)
+            # Train the model
+            pipeline_opt.fit(x_train_opt, y_train_opt)
 
-            y_pred_test = pipeline_opt.predict(x_test_opt.to_dict(orient="records"))
-            rmse_test: float = mean_squared_error(
-                y_test_opt, y_pred_test, squared=False
-            )
+            # Evaluate on validation and test sets
+            y_pred_val = pipeline_opt.predict(x_val_opt)
+            y_pred_test = pipeline_opt.predict(x_test_opt)
 
-            mlflow.log_metric("RMSE_Val", rmse_val)
-            logger.info("Trial %s: RMSE_Val = %s", trial.number, rmse_val)
+            # Calculate classification metrics
+            accuracy_val = accuracy_score(y_val_opt, y_pred_val)
+            precision_val = precision_score(y_val_opt, y_pred_val)
+            recall_val = recall_score(y_val_opt, y_pred_val)
+            f1_val = f1_score(y_val_opt, y_pred_val)
 
-            mlflow.log_metric("RMSE_Test", rmse_test)
-            logger.info("Trial %s: RMSE_Test = %s", trial.number, rmse_test)
+            # Log metrics to MLflow
+            mlflow.log_metric("accuracy_val", accuracy_val)
+            mlflow.log_metric("precision_val", precision_val)
+            mlflow.log_metric("recall_val", recall_val)
+            mlflow.log_metric("f1_val", f1_val)
 
-            model_id = mlflow_exp_obj.get_max_model_id(hpo_run_id)
-
-            mlflow.set_tag("model_id", str(model_id))
-
-            mlflow.set_tag(
-                "data_info", str({k: v["month"] for k, v in file_names.items()})
-            )
-
-            # log pipeline as an mlflow artifact
+            # Log the model
             mlflow.sklearn.log_model(sk_model=pipeline_opt, artifact_path="model")
 
-        return rmse_test
+        return f1_val
 
-    study = optuna.create_study(direction="minimize", sampler=TPESampler(seed=42))
+    study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=42))
     study.optimize(objective, n_trials=num_trials)
 
 
@@ -151,7 +123,7 @@ if __name__ == "__main__":
         config = yaml.safe_load(filename)
 
     # attributing required constants
-    DATA_DIR = BASE_PATH / "data"
+    DATA_DIR = (BASE_PATH / config["constants"]["DATA_DIR"]).resolve()
     S3_URL = config["constants"]["S3_URL"]
     PREFIX = config["constants"]["PREFIX"]
     HPO_EXPERIMENT_NAME = config["constants"]["HPO_EXPERIMENT_NAME"]
@@ -180,7 +152,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-trials",
         type=int,
-        default=2,
+        default=1,  # Changed from 2 to 1
         help="Number of trials for each Run at mlflow",
     )
     parser.add_argument(
@@ -212,17 +184,26 @@ if __name__ == "__main__":
     # Load and split the dataset using the same data_handler instance
     dataset_split = data_handler.load_split_dataset(FILE_NAMES)
 
-    preprocessor = Pipeline(
-        [("dict_vectorizer", DictVectorizer(sparse=False))], memory="preprocessor_cache"
-    )
-
-    pipeline = Pipeline(
-        [("preprocessor", preprocessor), ("random_forest", RandomForestRegressor())]
-    )
+    # Pipeline to use ExplainableBoostingClassifier
+    pipeline = Pipeline([
+        ("ebm", ExplainableBoostingClassifier())
+    ])
 
     # Instantiate mlflow context object
     db_path = os.path.join(BASE_PATH, "mlflow.db")
     mlflowcontext = MlFlowContext(db_path, HPO_EXPERIMENT_NAME, args)
+
+    # Add debug logs to track pipeline execution
+    logger.info("Starting the pipeline execution...")
+
+    # Log dataset split details
+    logger.info(f"Dataset split details: {dataset_split}")
+
+    # Log pipeline initialization
+    logger.info("Pipeline initialized with ExplainableBoostingClassifier.")
+
+    # Log MLflow context initialization
+    logger.info(f"MLflow context initialized with database path: {db_path} and experiment name: {HPO_EXPERIMENT_NAME}")
 
     logger.info("Running the optimization...")
 
@@ -234,8 +215,20 @@ if __name__ == "__main__":
         pipeline,
     )
 
+    # Log before running optimization
+    logger.info("Starting hyperparameter optimization...")
+
+    # Log after optimization
+    logger.info("Hyperparameter optimization completed.")
+
     logger.info("Running the model registry...")
+
+    # Log before model registration
+    logger.info("Starting model registration...")
 
     MlFlowModelManager(mlflowcontext).run_register_model(
         HPO_CHAMPION_MODEL, dataset_split.x_test, dataset_split.y_test
     )
+
+    # Log after model registration
+    logger.info("Model registration completed.")
