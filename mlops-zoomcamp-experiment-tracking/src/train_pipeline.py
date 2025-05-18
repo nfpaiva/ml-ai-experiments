@@ -24,6 +24,22 @@ from mlflowhelper import MlFlowContext, MlFlowExperimentRegistry, MlFlowModelMan
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Get absolute path of this module and its directory path
+FILE_PATH = Path(__file__).resolve()
+BASE_PATH = FILE_PATH.parent
+
+# Add the scripts directory to the Python module search path
+import sys
+
+sys.path.append(str(BASE_PATH.parent / "scripts"))
+
+# Rebuild the TRACKING_URI and ARTIFACT_ROOT using relative paths
+TRACKING_URI = f"sqlite:///{BASE_PATH.parent / 'mlflow/mlflow.db'}"
+ARTIFACT_ROOT = str(BASE_PATH.parent / 'mlflow/mlruns')
+
+# Set MLflow tracking URI
+mlflow.set_tracking_uri(TRACKING_URI)
+
 
 def run_optimization(
     file_names: Dict[str, Dict[str, str]],
@@ -64,9 +80,9 @@ def run_optimization(
     def objective(trial) -> float:
         # Define hyperparameters for ExplainableBoostingClassifier
         params = {
-            "max_bins": trial.suggest_int("max_bins", 32, 64),
-            "max_interaction_bins": trial.suggest_int("max_interaction_bins", 32, 64),
-            "interactions": trial.suggest_int("interactions", 0, 1),
+            "max_bins": trial.suggest_int("max_bins", 8, 16),
+            "max_interaction_bins": trial.suggest_int("max_interaction_bins", 8, 16),
+            "interactions": trial.suggest_int("interactions", 0, 0),  # Disable interactions
         }
 
         with mlflow.start_run(experiment_id=mlflow_exp_obj.experiment.experiment_id):
@@ -80,6 +96,13 @@ def run_optimization(
             mlflow.set_tag("developer", "nfpaiva")
             mlflow.set_tag("hpo_run_id", str(hpo_run_id))
             mlflow.log_params(params)
+
+            # Concatenate train, validation, and test months into a single dataset tag
+            dataset_tag = f"train:{args.train_month}, val:{args.val_month}, test:{args.test_month}"
+            mlflow.set_tag("dataset", dataset_tag)
+
+            # Tag the "Dataset" column with the same value as the "dataset" column
+            mlflow.log_param("Dataset", dataset_tag)
 
             # Update pipeline with hyperparameters
             pipeline_opt.set_params(ebm__max_bins=params["max_bins"], ebm__max_interaction_bins=params["max_interaction_bins"], ebm__interactions=params["interactions"])
@@ -123,7 +146,7 @@ if __name__ == "__main__":
         config = yaml.safe_load(filename)
 
     # attributing required constants
-    DATA_DIR = (BASE_PATH / config["constants"]["DATA_DIR"]).resolve()
+    DATA_DIR = (BASE_PATH.parent / "data").resolve()
     S3_URL = config["constants"]["S3_URL"]
     PREFIX = config["constants"]["PREFIX"]
     HPO_EXPERIMENT_NAME = config["constants"]["HPO_EXPERIMENT_NAME"]
@@ -186,18 +209,18 @@ if __name__ == "__main__":
 
     # Pipeline to use ExplainableBoostingClassifier
     pipeline = Pipeline([
-        ("ebm", ExplainableBoostingClassifier())
+        ("ebm", ExplainableBoostingClassifier(max_bins=16, max_interaction_bins=16, interactions=0))
     ])
 
+    # Ensure the reset flag is explicitly checked before passing to MlFlowContext
+    reset_flag = args.flag_reset_mlflow.upper() == "Y"
+
     # Instantiate mlflow context object
-    db_path = os.path.join(BASE_PATH, "mlflow.db")
+    db_path = TRACKING_URI.replace("sqlite://", "")
     mlflowcontext = MlFlowContext(db_path, HPO_EXPERIMENT_NAME, args)
 
     # Add debug logs to track pipeline execution
     logger.info("Starting the pipeline execution...")
-
-    # Log dataset split details
-    logger.info(f"Dataset split details: {dataset_split}")
 
     # Log pipeline initialization
     logger.info("Pipeline initialized with ExplainableBoostingClassifier.")

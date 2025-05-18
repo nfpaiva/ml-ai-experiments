@@ -7,7 +7,7 @@ name = "mlops-zoomcamp-experiment-tracking"
 version = "0.1.0"
 description = "MLOps Zoomcamp Experiment Tracking Application"
 authors = [
-    { name = "Nuno Paiva", email = "nuno@example.com" }
+    { name = "Nuno Paiva", email = "nuno.f.paiva@gmail.com" }
 ]
 license = { text = "MIT" }
 readme = "README.md"

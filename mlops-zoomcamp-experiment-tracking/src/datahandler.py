@@ -118,13 +118,16 @@ class DataHandler:
             "lpep_pickup_datetime", "lpep_dropoff_datetime"
         ])
 
+        # Ensure dataset is a copy to avoid SettingWithCopyWarning
+        dataset = dataset.copy()
+
         # Target: is the trip marked as cash?
-        dataset["is_cash_payment"] = (dataset["payment_type"] == 2).astype(int)
+        dataset.loc[:, "is_cash_payment"] = (dataset["payment_type"] == 2).astype(int)
 
         # Feature engineering
-        dataset["pickup_hour"] = dataset["lpep_pickup_datetime"].dt.hour
-        dataset["pickup_weekday"] = dataset["lpep_pickup_datetime"].dt.weekday
-        dataset["trip_duration_minutes"] = (
+        dataset.loc[:, "pickup_hour"] = dataset["lpep_pickup_datetime"].dt.hour
+        dataset.loc[:, "pickup_weekday"] = dataset["lpep_pickup_datetime"].dt.weekday
+        dataset.loc[:, "trip_duration_minutes"] = (
             dataset["lpep_dropoff_datetime"] - dataset["lpep_pickup_datetime"]
         ).dt.total_seconds() / 60
 

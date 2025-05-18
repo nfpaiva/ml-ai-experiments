@@ -119,8 +119,8 @@ class MlFlowContext:
             args_init.flag_reset_mlflow
         )  # Get flag_reset_mlflow val from args
 
-        # Call reset_mlflow method during object initialization if specified in args
-        if self.flag_reset_mlflow == "Y":
+        # Only reset MLflow if explicitly required
+        if hasattr(args_init, 'flag_reset_mlflow') and args_init.flag_reset_mlflow == "Y":
             self.reset_mlflow()
         # Call setup_mlflow method during object initialization
         self.setup_mlflow()
@@ -439,22 +439,28 @@ class MlFlowModelManager:
             stage="Archived",
         )
 
+        # Register the challenger model if not already registered
+        registered_versions = self.client_mlflow.get_latest_versions(hpo_champion_model)
+        challenger_version = None
+        for version in registered_versions:
+            if version.source == best_model_uri:
+                challenger_version = version.version
+                break
+
+        if not challenger_version:
+            registered_model = mlflow.register_model(best_model_uri, hpo_champion_model)
+            challenger_version = registered_model.version
+
         # Promote the challenger model to production
-        latest_versions = self.client_mlflow.get_latest_versions(hpo_champion_model)
-        if not latest_versions:
-            raise MlflowException(f"No registered versions found for model {hpo_champion_model}")
-
-        latest_version = latest_versions[0].version
-
         self.client_mlflow.transition_model_version_stage(
             name=hpo_champion_model,
-            version=latest_version,
+            version=challenger_version,
             stage="Production",
         )
 
         logger.info(
-            "The best model from the last run put into production "
-            "and the current model in production archived."
+            "The best model from the last run has been promoted to production, "
+            "and the current production model has been archived."
         )
 
     def run_register_model(
@@ -522,9 +528,10 @@ class MlFlowModelManager:
             # Add a custom tag to the best model URI to indicate the outcome of the comparison
             custom_tag = {
                 "comparison_outcome": "better_than_production"
-                if f1_best < f1_production
+                if f1_best > f1_production
                 else "not_better_than_production",
-                "production_model_uri": str(production_version_details.run_id),
+                "production_model_uri": str(production_version_details.run_id)
+                if production_version_details else "None",
                 "test_f1": str(f1_best),
             }
 
