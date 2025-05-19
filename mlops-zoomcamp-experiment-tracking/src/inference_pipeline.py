@@ -79,11 +79,8 @@ def main():
 
 
     # Access the raw sklearn model
-    logger.info("Accessing the raw sklearn model...")
     raw_model = model.get_raw_model()
-    logger.info(f"Raw model type: {type(raw_model)}")
-    logger.info(f"Raw model attributes: {dir(raw_model)}")
-
+    
     # Perform inference
     logger.info("Performing inference...")
     predictions = raw_model.predict(X)
