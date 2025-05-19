@@ -35,13 +35,13 @@ from typing import Union, Tuple
 
 import pandas as pd
 import numpy as np
+from sklearn.metrics import f1_score  # Import f1_score for classification
+
 import mlflow
 from mlflow.tracking import MlflowClient  # type: ignore
 from mlflow.entities import Run, model_registry  # type: ignore
 from mlflow.entities.experiment import Experiment  # type: ignore
-from mlflow.exceptions import MlflowException # type: ignore
-
-from sklearn.metrics import f1_score  # Import f1_score for classification
+from mlflow.exceptions import MlflowException  # type: ignore
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -361,22 +361,18 @@ class MlFlowModelManager:
 
     def calc_f1_champion_challenger_model(
         self,
-        hpo_champion_model: str,
         x_test: pd.DataFrame,
         y_test: Union[np.ndarray, pd.Series],
         best_model_uri: str,
-        best_run: mlflow.entities.Run,
         production_pipeline: mlflow.pyfunc.PythonModel,
     ) -> Tuple[float, float]:
         """
         Calculate the F1 score for the champion and challenger models.
 
         Args:
-            hpo_champion_model (str): Name of the HPO champion model.
             x_test (pd.DataFrame): Test features.
             y_test (Union[np.ndarray, pd.Series]): Test labels.
             best_model_uri (str): URI of the best model.
-            best_run (mlflow.entities.Run): Best run object.
             production_pipeline (mlflow.pyfunc.PythonModel): Production model pipeline.
 
         Returns:
@@ -472,11 +468,9 @@ class MlFlowModelManager:
                     f"No production model found for {hpo_champion_model}"
                 )
             f1_production, f1_best = self.calc_f1_champion_challenger_model(
-                hpo_champion_model,
                 x_test_reg,
                 y_test_reg,
                 best_model_uri,
-                best_run,
                 production_pipeline,
             )
             # Compare F1 scores and promote the best model if needed
@@ -518,10 +512,33 @@ class MlFlowModelManager:
 
             latest_versions = self.client_mlflow.get_latest_versions(hpo_champion_model)
             if not latest_versions:
-                raise MlflowException(f"No versions found after registering model {hpo_champion_model}")
+                raise MlflowException(
+                    f"No versions found after registering model {hpo_champion_model}"
+                )
 
             new_version = latest_versions[0].version
 
             self.client_mlflow.transition_model_version_stage(
-                name=hpo_champion_model, version=new_version, stage="Production"
+                name=hpo_champion_model,
+                version=new_version,
+                stage="Production"
             )
+
+    def get_production_model_uri(self, experiment_name: str) -> str:
+        """
+        Retrieve the URI of the model registered as "Production" in MLflow for a given experiment name.
+
+        Args:
+            experiment_name (str): The name of the experiment to retrieve the production model for.
+
+        Returns:
+            str: The URI of the production model.
+
+        Raises:
+            ValueError: If no production model is found for the given experiment name.
+        """
+        production_version = self.get_production_version(experiment_name)
+        if production_version is None:
+            raise ValueError(f"No production model found for experiment: {experiment_name}")
+
+        return production_version.source
