@@ -1,9 +1,10 @@
 """
 train_pipeline.py
 
-This script orchestrates the training pipeline for machine learning models. It includes data loading,
-preprocessing, model training, hyperparameter optimization, and model evaluation. The results are
-logged in MLflow for experiment tracking and reproducibility.
+This script orchestrates the training pipeline for machine learning models. 
+It includes data loading,preprocessing, model training, hyperparameter 
+optimization, and model evaluation. The results are logged in MLflow 
+for experiment tracking and reproducibility.
 
 Usage:
     python train_pipeline.py --train-month YYYY-MM --val-month YYYY-MM --test-month YYYY-MM
@@ -13,33 +14,40 @@ Arguments:
     --val-month (str): The month for the validation dataset in the format YYYY-MM.
     --test-month (str): The month for the test dataset in the format YYYY-MM.
     --num-trials (int, optional): Number of trials for hyperparameter optimization. Default is 1.
-    --flag-reset-mlflow (str, optional): Whether to reset the MLflow database. Options are 'Y' or 'N'. Default is 'N'.
+    --flag-reset-mlflow (str, optional): Whether to reset the MLflow database. 
+    Options are 'Y' or 'N'.
+        Default is 'N'.
 
 Functions:
     run_optimization(): Runs hyperparameter optimization using Optuna.
 """
 
-"""train_pipeline.py """
+# Standard library imports
 import argparse
 import datetime
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Dict
 
-
-import yaml
-
 import optuna
-import mlflow  # type: ignore
-from optuna.samplers import TPESampler
+import yaml
 from interpret.glassbox import ExplainableBoostingClassifier
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from optuna.samplers import TPESampler
+from sklearn.metrics import (
+    accuracy_score, f1_score, precision_score, recall_score
+)
 from sklearn.pipeline import Pipeline  # type: ignore
 
-from datasetsplit import DatasetSplit
+# Third-party imports
+import mlflow
+# Local application imports
 from datahandler import DataHandler
-from mlflowhelper import MlFlowContext, MlFlowExperimentRegistry, MlFlowModelManager
+from datasetsplit import DatasetSplit
+from mlflowhelper import (
+    MlFlowContext, MlFlowExperimentRegistry, MlFlowModelManager
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -50,8 +58,6 @@ FILE_PATH = Path(__file__).resolve()
 BASE_PATH = FILE_PATH.parent
 
 # Add the scripts directory to the Python module search path
-import sys
-
 sys.path.append(str(BASE_PATH.parent / "scripts"))
 
 # Rebuild the TRACKING_URI and ARTIFACT_ROOT using relative paths
@@ -68,6 +74,7 @@ def run_optimization(
     mlflow_exp_obj: MlFlowExperimentRegistry,
     num_trials: int,
     pipeline_opt: Pipeline,
+    parsed_args: argparse.Namespace,  # Renamed from args to parsed_args
 ) -> None:
     """Run the hyperparameter optimization using Optuna.
 
@@ -133,14 +140,24 @@ def run_optimization(
             mlflow.log_params(params)
 
             # Concatenate train, validation, and test months into a single dataset tag
-            dataset_tag = f"train:{args.train_month}, val:{args.val_month}, test:{args.test_month}"
+            dataset_tag = (
+                f"train:{parsed_args.train_month}, val:{parsed_args.val_month}, "
+                f"test:{parsed_args.test_month}"
+            )
             mlflow.set_tag("dataset", dataset_tag)
 
             # Tag the "Dataset" column with the same value as the "dataset" column
             mlflow.log_param("Dataset", dataset_tag)
 
+            # Log file_names as a tag in MLflow for dataset retrieval
+            mlflow.set_tag("file_names", str(file_names))
+
             # Update pipeline with hyperparameters
-            pipeline_opt.set_params(ebm__max_bins=params["max_bins"], ebm__max_interaction_bins=params["max_interaction_bins"], ebm__interactions=params["interactions"])
+            pipeline_opt.set_params(
+                ebm__max_bins=params["max_bins"],
+                ebm__max_interaction_bins=params["max_interaction_bins"],
+                ebm__interactions=params["interactions"]
+            )
 
             # Train the model
             pipeline_opt.fit(x_train_opt, y_train_opt)
@@ -160,6 +177,18 @@ def run_optimization(
             mlflow.log_metric("precision_val", precision_val)
             mlflow.log_metric("recall_val", recall_val)
             mlflow.log_metric("f1_val", f1_val)
+
+            # Evaluate on test set
+            accuracy_test = accuracy_score(y_test_opt, y_pred_test)
+            precision_test = precision_score(y_test_opt, y_pred_test)
+            recall_test = recall_score(y_test_opt, y_pred_test)
+            f1_test = f1_score(y_test_opt, y_pred_test)
+
+            # Log test metrics to MLflow
+            mlflow.log_metric("accuracy_test", accuracy_test)
+            mlflow.log_metric("precision_test", precision_test)
+            mlflow.log_metric("recall_test", recall_test)
+            mlflow.log_metric("f1_test", f1_test)
 
             # Log the model
             mlflow.sklearn.log_model(sk_model=pipeline_opt, artifact_path="model")
@@ -261,7 +290,10 @@ if __name__ == "__main__":
     logger.info("Pipeline initialized with ExplainableBoostingClassifier.")
 
     # Log MLflow context initialization
-    logger.info(f"MLflow context initialized with database path: {db_path} and experiment name: {HPO_EXPERIMENT_NAME}")
+    logger.info(
+        "MLflow context initialized with database path: %s and experiment name: %s",
+        db_path, HPO_EXPERIMENT_NAME
+    )
 
     logger.info("Running the optimization...")
 
@@ -271,6 +303,7 @@ if __name__ == "__main__":
         MlFlowExperimentRegistry(mlflowcontext),
         args.num_trials,
         pipeline,
+        args,  # Pass args as parsed_args
     )
 
     # Log before running optimization
