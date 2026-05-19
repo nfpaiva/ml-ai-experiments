@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sonic Atlas</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
+:root{--bg:#08080f;--bg2:#111118;--bg3:#1a1a26;--border:rgba(255,255,255,0.07);--text:#e8e6f0;--muted:#6b6882;--accent:#7c6af0}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:"DM Sans",sans-serif;overflow:hidden;width:100vw;height:100vh}
+#gc{position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:1;cursor:grab}
+#gc.dragging{cursor:grabbing}
+
+/* NAV */
+#nav{position:fixed;bottom:32px;left:50%;transform:translateX(-50%);z-index:20;display:flex;align-items:center;gap:16px;background:rgba(8,8,15,0.88);border:1px solid var(--border);border-radius:40px;padding:10px 20px;backdrop-filter:blur(16px)}
+.nav-btn{background:none;border:1px solid var(--border);color:var(--muted);width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:all .2s}
+.nav-btn:hover{border-color:rgba(255,255,255,.3);color:var(--text)}
+.nav-btn:disabled{opacity:.25;cursor:default}
+#nav-dots{display:flex;gap:8px;align-items:center}
+.nav-dot{width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.2);cursor:pointer;transition:all .25s}
+.nav-dot.on{background:var(--accent);width:8px;height:8px}
+#nav-label{font-family:"DM Mono",monospace;font-size:10px;letter-spacing:.12em;color:var(--muted);min-width:160px;text-align:center}
+
+/* ACT CARD */
+#act-card{position:fixed;top:50%;left:5vw;transform:translateY(-50%);z-index:20;max-width:330px;background:rgba(8,8,15,0.92);backdrop-filter:blur(20px);border:1px solid var(--border);border-radius:18px;padding:26px 28px;transition:opacity .4s,transform .4s}
+#act-card.hidden{opacity:0;transform:translateY(-50%) translateX(-20px);pointer-events:none}
+.eyebrow{font-family:"DM Mono",monospace;font-size:10px;letter-spacing:.18em;color:var(--accent);text-transform:uppercase;margin-bottom:10px}
+.card-title{font-size:20px;font-weight:600;line-height:1.25;margin-bottom:12px}
+.card-body{font-size:13px;line-height:1.8;color:var(--muted)}
+.card-body strong{color:var(--text);font-weight:500}
+.stats{display:flex;gap:8px;margin-top:16px}
+.stat{flex:1;background:var(--bg3);border-radius:10px;padding:10px 12px;border:1px solid var(--border)}
+.stat-v{font-family:"DM Mono",monospace;font-size:17px;font-weight:500;color:var(--accent)}
+.stat-l{font-size:10px;color:var(--muted);margin-top:2px}
+
+/* OVERLAY UI */
+#tt{position:fixed;background:rgba(8,8,15,0.97);border:1px solid var(--border);border-radius:10px;padding:10px 14px;font-size:12px;pointer-events:none;opacity:0;transition:opacity .15s;max-width:240px;z-index:100}
+#tt.vis{opacity:1}
+.tt-n{font-weight:500;font-size:13px;margin-bottom:4px}
+.tt-i{color:var(--muted);font-size:11px;line-height:1.6}
+.tt-tribe{display:inline-block;margin-top:4px;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:500}
+
+/* LEGEND */
+#leg{position:fixed;top:28px;left:32px;background:rgba(8,8,15,0.92);border:1px solid var(--border);border-radius:12px;padding:14px 18px;font-size:11px;opacity:0;transition:opacity .5s;pointer-events:none;max-width:220px;z-index:20}
+#leg.vis{opacity:1;pointer-events:all}
+.leg-t{font-family:"DM Mono",monospace;font-size:9px;letter-spacing:.12em;color:var(--muted);text-transform:uppercase;margin-bottom:10px}
+.leg-i{display:flex;align-items:center;gap:8px;margin-bottom:6px;color:var(--muted);cursor:pointer;transition:color .2s}
+.leg-i:hover{color:var(--text)}
+.leg-d{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+
+/* HERO */
+#hero{position:fixed;top:0;left:0;width:100vw;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:5;pointer-events:none;transition:opacity .8s}
+#hero.hidden{opacity:0}
+.h-eye{font-family:"DM Mono",monospace;font-size:10px;letter-spacing:.22em;color:var(--accent);text-transform:uppercase;margin-bottom:14px}
+.h-title{font-size:clamp(44px,7vw,88px);font-weight:600;letter-spacing:-.02em;background:linear-gradient(135deg,#e8e6f0 0%,#7c6af0 50%,#4ecdc4 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;line-height:1;margin-bottom:14px;text-align:center}
+.h-sub{font-size:15px;color:var(--muted);margin-bottom:36px}
+.h-cta{font-family:"DM Mono",monospace;font-size:11px;letter-spacing:.12em;color:var(--muted);border:1px solid var(--border);padding:10px 24px;border-radius:30px;cursor:pointer;background:none;transition:all .2s;pointer-events:all}
+.h-cta:hover{border-color:var(--accent);color:var(--accent)}
+
+/* TRIBE PANEL */
+#tribe-panel{position:fixed;right:0;top:0;width:380px;height:100vh;background:rgba(8,8,15,0.96);border-left:1px solid var(--border);z-index:15;display:flex;flex-direction:column;transform:translateX(100%);transition:transform .4s cubic-bezier(.16,1,.3,1);overflow:hidden}
+#tribe-panel.vis{transform:translateX(0)}
+#tp-header{padding:24px 24px 16px;border-bottom:1px solid var(--border);flex-shrink:0}
+#tp-tabs{display:flex;gap:6px;flex-wrap:wrap;padding:16px 24px 8px;flex-shrink:0;border-bottom:1px solid var(--border);overflow-y:auto;max-height:160px}
+.tp-tab{font-size:11px;padding:5px 10px;border-radius:20px;border:1px solid var(--border);cursor:pointer;transition:all .2s;color:var(--muted);white-space:nowrap}
+.tp-tab:hover{border-color:rgba(255,255,255,.2);color:var(--text)}
+.tp-tab.sel{color:#08080f}
+#tp-body{flex:1;overflow-y:auto;padding:20px 24px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+#tp-tribe-name{font-size:17px;font-weight:600;margin-bottom:4px}
+#tp-tribe-meta{font-size:11px;color:var(--muted);margin-bottom:12px;font-family:"DM Mono",monospace}
+#tp-desc{font-size:13px;line-height:1.75;color:var(--muted);font-style:italic;margin-bottom:20px;min-height:60px;border-left:2px solid var(--accent);padding-left:12px}
+#tp-desc.loading{color:rgba(107,104,130,.4);border-left-color:rgba(107,104,130,.3)}
+#tp-artists-title{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-family:"DM Mono",monospace;margin-bottom:12px}
+#tp-artists{display:flex;flex-wrap:wrap;gap:6px}
+.artist-pill{font-size:11px;padding:4px 10px;border-radius:20px;border:1px solid var(--border);color:var(--muted)}
+#tp-close{position:absolute;top:20px;right:20px;background:none;border:1px solid var(--border);color:var(--muted);width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;transition:all .2s}
+#tp-close:hover{color:var(--text);border-color:rgba(255,255,255,.3)}
+
+/* CONNECTOR LABELS */
+.conn-label{font-family:"DM Mono",monospace;font-size:10px;fill:#f7b731;pointer-events:none;text-anchor:middle;dominant-baseline:auto;opacity:0;transition:opacity .5s}
+.conn-label.vis{opacity:1}
+.obs-label{font-family:"DM Sans",sans-serif;font-size:10px;fill:var(--text);pointer-events:none;text-anchor:middle;dominant-baseline:auto;opacity:0;paint-order:stroke;stroke:rgba(8,8,15,0.85);stroke-width:3px;stroke-linejoin:round}
+
+/* ZOOM HINT */
+#zoom-hint{position:fixed;bottom:90px;left:50%;transform:translateX(-50%);font-family:"DM Mono",monospace;font-size:10px;letter-spacing:.1em;color:var(--muted);opacity:0;transition:opacity .5s;pointer-events:none;z-index:20}
+#zoom-hint.vis{opacity:1}
+</style>
+</head>
+<body>
+
+<svg id="gc"></svg>
+
+<div id="tt"><div class="tt-n"></div><div class="tt-i"></div></div>
+<div id="leg"><div class="leg-t">Tribes</div><div id="leg-items"></div></div>
+
+<div id="hero">
+  <div class="h-eye">Sonic Atlas</div>
+  <div class="h-title">Your Music<br>Universe</div>
+  <div class="h-sub">2,322 songs · 1,883 artists · mapped as a network</div>
+  <button class="h-cta" onclick="goAct(0);document.getElementById('hero').classList.add('hidden')">Begin Exploration →</button>
+</div>
+
+<div id="act-card" class="hidden"></div>
+
+<div id="nav">
+  <button class="nav-btn" id="nav-prev" onclick="navigate(-1)">←</button>
+  <div id="nav-dots"></div>
+  <button class="nav-btn" id="nav-next" onclick="navigate(1)">→</button>
+  <div id="nav-label"></div>
+</div>
+
+<div id="zoom-hint">scroll to zoom · drag to pan</div>
+
+<div id="tribe-panel">
+  <button id="tp-close">×</button>
+  <div id="tp-header">
+    <div style="font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.15em;color:var(--accent);text-transform:uppercase;margin-bottom:8px">Act 05 — Musical DNA</div>
+    <div style="font-size:13px;color:var(--muted)">Click a tribe tab to explore</div>
+  </div>
+  <div id="tp-tabs"></div>
+  <div id="tp-body">
+    <div id="tp-tribe-name"></div>
+    <div id="tp-tribe-meta"></div>
+    <div id="tp-desc"></div>
+    <div id="tp-artists-title">Artists in this tribe</div>
+    <div id="tp-artists"></div>
+  </div>
+</div>
+
+<script>
+%%DATA_BLOCK%%
+const GD = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(_b64), c => c.charCodeAt(0))));
+const COLORS = ['#7c6af0','#4ecdc4','#f7b731','#ff6b6b','#a8e6cf','#fd79a8','#74b9ff','#55efc4','#fdcb6e','#e17055'];
+
+const ACT_CONTENT = [
+  {
+    eyebrow: 'Act 01 — Universe',
+    title: 'Your Playlist Universe',
+    body: 'Every dot is an artist. Lines connect musically similar artists via Last.fm similarity scores.<br><br><strong>All 1,883 artists</strong> are shown. Use scroll to zoom and drag to pan.',
+    stats: true
+  },
+  {
+    eyebrow: 'Act 02 — Tribes',
+    title: 'Your Taste Tribes',
+    body: 'Louvain community detection found <strong>10 major tribes</strong> across your 1,883 artists — from Classic Jazz to Portuguese Music.<br><br>Each colour is a tribe. Click the legend or any node to isolate one.'
+  },
+  {
+    eyebrow: 'Act 03 — Connectors',
+    title: 'The Bridge Builders',
+    body: 'Gold nodes have the highest <strong>betweenness centrality</strong> — they bridge otherwise separate tribes.<br><br><strong>Wau Wau Collectif</strong> is your top connector, linking jazz, neo-soul and ambient worlds.'
+  },
+  {
+    eyebrow: 'Act 04 — Depth',
+    title: 'Your Personal Obsessions',
+    body: 'Node size = <strong>tracks saved per artist</strong>. Hover any node to see name, saved tracks, connections and tribe.<br><br><strong>Robert Glasper</strong> leads with 25 tracks in your library.'
+  },
+  {
+    eyebrow: 'Act 05 — DNA',
+    title: 'Your Musical DNA',
+    body: 'Each tribe profiled by AI. The panel shows all artists per tribe with a personality description.<br><br><strong>Click any tribe tab</strong> — the graph zooms to that cluster automatically.'
+  }
+];
+
+const ACT_LABELS = ['Universe','Tribes','Connectors','Depth','DNA'];
+const topCommIds = Object.keys(GD.communities).map(Number);
+const commColorMap = {};
+topCommIds.forEach((c,i) => commColorMap[c] = i);
+
+function nodeColor(d, a) {
+  if(a < 1) return 'rgba(255,255,255,0.25)';
+  const ci = commColorMap[d.community];
+  return ci !== undefined ? COLORS[ci % COLORS.length] : 'rgba(255,255,255,0.08)';
+}
+function nodeR(d, a) {
+  if(a === 3 || a === 4) return Math.max(2, Math.min(20, 2 + d.track_count * 0.5));
+  if(a === 2) return d.betweenness >= 0.005 ? Math.max(5, d.degree * 0.06) : 2;
+  return Math.max(2, Math.min(10, 2 + d.degree * 0.04));
+}
+
+let act = -1, highlighted = null, zoomBehavior;
+let svg, gGraph, linkSel, circSel, labelSel, obsLabelSel, sim;
+const nodes = GD.nodes.map(d => ({...d}));
+const edges = GD.edges.map(d => ({...d}));
+
+// ── Build nav ─────────────────────────────────────────────────────────────────
+function buildNav() {
+  const dotsEl = document.getElementById('nav-dots');
+  ACT_LABELS.forEach((lbl, i) => {
+    const dot = document.createElement('div');
+    dot.className = 'nav-dot';
+    dot.dataset.i = i;
+    dot.title = lbl;
+    dot.addEventListener('click', () => goAct(i));
+    dotsEl.appendChild(dot);
+  });
+}
+
+function navigate(dir) {
+  const next = act + dir;
+  if(next >= 0 && next < ACT_LABELS.length) goAct(next);
+}
+
+// ── Init graph ────────────────────────────────────────────────────────────────
+function initGraph() {
+  const W = window.innerWidth, H = window.innerHeight;
+  svg = d3.select('#gc').attr('width', W).attr('height', H);
+
+  zoomBehavior = d3.zoom()
+    .scaleExtent([0.08, 10])
+    .filter(e => {
+      // Allow zoom from wheel, allow drag, but NOT click (to preserve node clicks)
+      if(e.type === 'dblclick') return false;
+      return true;
+    })
+    .on('start', () => svg.classed('dragging', true))
+    .on('zoom', e => gGraph.attr('transform', e.transform))
+    .on('end', () => svg.classed('dragging', false));
+
+  svg.call(zoomBehavior);
+
+  gGraph = svg.append('g');
+
+  sim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(edges).id(d => d.id)
+      .distance(d => 55 - d.weight * 25)
+      .strength(d => d.weight * 0.45))
+    .force('charge', d3.forceManyBody().strength(-40))
+    .force('center', d3.forceCenter(W/2, H/2))
+    .force('collision', d3.forceCollide().radius(d => nodeR(d, 0) + 1.5));
+
+  linkSel = gGraph.append('g')
+    .selectAll('line').data(edges).join('line')
+    .attr('stroke', 'rgba(255,255,255,0.1)')
+    .attr('stroke-width', d => Math.max(0.3, d.weight * 1.2));
+
+  const gNode = gGraph.append('g')
+    .selectAll('g').data(nodes).join('g')
+    .call(d3.drag()
+      .on('start', (e,d) => { if(!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+      .on('drag', (e,d) => { d.fx=e.x; d.fy=e.y; })
+      .on('end', (e,d) => { if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; })
+    );
+
+  circSel = gNode.append('circle')
+    .attr('r', d => nodeR(d, 0))
+    .attr('fill', d => nodeColor(d, 0))
+    .attr('stroke', 'rgba(255,255,255,0.06)')
+    .attr('stroke-width', 0.4)
+    .style('cursor', 'pointer');
+
+  // Connector labels
+  labelSel = gGraph.append('g')
+    .selectAll('text')
+    .data(nodes.filter(d => d.betweenness >= 0.005))
+    .join('text')
+    .attr('class', 'conn-label')
+    .text(d => d.name)
+    .attr('dy', '-10px');
+
+  // Obsession labels (act 3/4) — artists with track_count >= threshold
+  const OBSESSION_THRESHOLD = 6;
+  const obsNodes = nodes.filter(d => d.track_count >= OBSESSION_THRESHOLD);
+  obsLabelSel = gGraph.append('g').attr('id','obs-labels')
+    .selectAll('text')
+    .data(obsNodes)
+    .join('text')
+    .attr('class', 'obs-label')
+    .text(d => `${d.name} (${d.track_count})`)
+    .attr('text-anchor', 'middle')
+    .attr('dy', '-12px');
+
+  const tt = document.getElementById('tt');
+  gNode
+    .on('mouseover', (e, d) => {
+      const cm = GD.communities[d.community];
+      const ci = commColorMap[d.community];
+      const color = ci !== undefined ? COLORS[ci % COLORS.length] : '#888';
+      tt.querySelector('.tt-n').textContent = d.name;
+      tt.querySelector('.tt-i').innerHTML =
+        `<b>${d.track_count}</b> tracks saved &nbsp;·&nbsp; <b>${d.degree}</b> connections<br>` +
+        `betweenness: ${d.betweenness.toFixed(4)}` +
+        (cm ? `<br><span class="tt-tribe" style="background:${color}22;color:${color}">${cm.label}</span>` : '');
+      tt.style.left = (e.clientX+14)+'px';
+      tt.style.top = (e.clientY-8)+'px';
+      tt.classList.add('vis');
+    })
+    .on('mousemove', e => { tt.style.left=(e.clientX+14)+'px'; tt.style.top=(e.clientY-8)+'px'; })
+    .on('mouseout', () => tt.classList.remove('vis'))
+    .on('click', (e, d) => {
+      e.stopPropagation();
+      if(act === 4) openTribe(d.community);
+      else highlightComm(d.community);
+    });
+
+  sim.on('tick', () => {
+    linkSel.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+            .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+    gNode.attr('transform', d => `translate(${d.x},${d.y})`);
+    labelSel.attr('x', d => d.x).attr('y', d => d.y);
+    if(obsLabelSel) obsLabelSel.attr('x', d => d.x).attr('y', d => d.y);
+  });
+
+  setTimeout(() => document.getElementById('zoom-hint').classList.add('vis'), 3000);
+  setTimeout(() => document.getElementById('zoom-hint').classList.remove('vis'), 7000);
+}
+
+// ── Highlight ─────────────────────────────────────────────────────────────────
+function highlightComm(c) {
+  if(highlighted === c) { highlighted = null; resetHL(); return; }
+  highlighted = c;
+  circSel.transition().duration(400).attr('opacity', d => d.community===c ? 1 : 0.04);
+  linkSel.transition().duration(400).attr('opacity', d => {
+    const sc = d.source.community ?? nodes.find(n=>n.id===(d.source.id||d.source))?.community;
+    const tc = d.target.community ?? nodes.find(n=>n.id===(d.target.id||d.target))?.community;
+    return (sc===c||tc===c) ? 0.5 : 0.01;
+  });
+  document.querySelectorAll('.leg-i').forEach(el => el.style.opacity = +el.dataset.c===c ? 1 : 0.35);
+}
+
+function resetHL() {
+  circSel.transition().duration(400).attr('opacity', 1);
+  linkSel.transition().duration(400).attr('opacity', d => Math.min(0.28, d.weight*0.35));
+  document.querySelectorAll('.leg-i').forEach(el => el.style.opacity = 1);
+}
+
+function zoomToComm(c) {
+  const members = nodes.filter(d => d.community === c && d.x && d.y);
+  if(!members.length) return;
+  const xs = members.map(d=>d.x), ys = members.map(d=>d.y);
+  const x0=Math.min(...xs), x1=Math.max(...xs), y0=Math.min(...ys), y1=Math.max(...ys);
+  const W=window.innerWidth, H=window.innerHeight;
+  const pad=100;
+  const scale = Math.min(0.85*W/(x1-x0+pad), 0.85*H/(y1-y0+pad), 5);
+  const tx = W/2 - scale*(x0+x1)/2;
+  const ty = H/2 - scale*(y0+y1)/2;
+  svg.transition().duration(750).call(zoomBehavior.transform, d3.zoomIdentity.translate(tx,ty).scale(scale));
+}
+
+function resetZoom() {
+  svg.transition().duration(600).call(zoomBehavior.transform, d3.zoomIdentity);
+}
+
+// ── Act transitions ───────────────────────────────────────────────────────────
+function goAct(a) {
+  if(a === act) return;
+  act = a;
+
+  // Always hide hero
+  document.getElementById('hero').classList.add('hidden');
+
+  // Nav UI
+  document.querySelectorAll('.nav-dot').forEach(el => el.classList.toggle('on', +el.dataset.i===a));
+  document.getElementById('nav-prev').disabled = a === 0;
+  document.getElementById('nav-next').disabled = a === ACT_LABELS.length - 1;
+  document.getElementById('nav-label').textContent = ACT_LABELS[a].toUpperCase();
+
+  // Act card
+  const card = document.getElementById('act-card');
+  card.classList.add('hidden');
+  setTimeout(() => {
+    const c = ACT_CONTENT[a];
+    card.innerHTML = `<div class="eyebrow">${c.eyebrow}</div><div class="card-title">${c.title}</div><div class="card-body">${c.body}</div>` +
+      (c.stats ? `<div class="stats">
+        <div class="stat"><div class="stat-v">2,322</div><div class="stat-l">liked songs</div></div>
+        <div class="stat"><div class="stat-v">1,883</div><div class="stat-l">artists</div></div>
+        <div class="stat"><div class="stat-v">14,332</div><div class="stat-l">connections</div></div>
+      </div>` : '');
+    card.classList.remove('hidden');
+  }, 200);
+
+  const W = window.innerWidth, H = window.innerHeight;
+
+  // Graph transitions
+  circSel.transition().duration(700)
+    .attr('fill', d => a===2 ? (d.betweenness>=0.005 ? '#f7b731' : 'rgba(255,255,255,0.05)') : nodeColor(d,a))
+    .attr('r', d => nodeR(d,a))
+    .attr('opacity', 1);
+
+  linkSel.transition().duration(700)
+    .attr('stroke', a===2 ? 'rgba(247,183,49,0.15)' : 'rgba(255,255,255,0.1)')
+    .attr('stroke-width', d => a===2 ? 0.3 : Math.max(0.3,d.weight*1.2))
+    .attr('opacity', d => a===2 ? 0.2 : Math.min(0.28,d.weight*0.35));
+
+  labelSel.classed('vis', a===2);
+  if(obsLabelSel) {
+    const showObs = (a===3 || a===4);
+    obsLabelSel.transition().duration(500).style('opacity', showObs ? 0.85 : 0);
+  }
+
+  // Legend
+  const leg = document.getElementById('leg');
+  leg.classList.toggle('vis', a >= 1);
+  if(a >= 1 && !leg.dataset.built) { buildLegend(); leg.dataset.built='1'; }
+
+  // Tribe panel
+  const panel = document.getElementById('tribe-panel');
+  if(a === 4) {
+    panel.classList.add('vis');
+    if(!panel.dataset.built) { buildTribePanel(); panel.dataset.built='1'; }
+  } else {
+    panel.classList.remove('vis');
+    if(highlighted !== null) { resetHL(); highlighted = null; }
+    resetZoom();
+  }
+
+  // Cluster forces act 1
+  if(a === 1) {
+    topCommIds.forEach((c,i) => {
+      const angle = (i/topCommIds.length)*Math.PI*2;
+      const r = Math.min(W,H)*0.3;
+      sim.force('cx'+c, d3.forceX(W/2+Math.cos(angle)*r).strength(d => d.community===c?0.06:0));
+      sim.force('cy'+c, d3.forceY(H/2+Math.sin(angle)*r).strength(d => d.community===c?0.06:0));
+    });
+    sim.alpha(0.3).restart();
+  } else {
+    topCommIds.forEach(c => { sim.force('cx'+c,null); sim.force('cy'+c,null); });
+    if(a===0) sim.alpha(0.1).restart();
+  }
+}
+
+// ── Legend ────────────────────────────────────────────────────────────────────
+function buildLegend() {
+  const el = document.getElementById('leg-items');
+  topCommIds.forEach((c,i) => {
+    const cm = GD.communities[c];
+    if(!cm) return;
+    const li = document.createElement('div');
+    li.className='leg-i'; li.dataset.c=c;
+    li.innerHTML=`<div class="leg-d" style="background:${COLORS[i%COLORS.length]}"></div><span>${cm.label} (${cm.size})</span>`;
+    li.addEventListener('click', () => highlightComm(c));
+    el.appendChild(li);
+  });
+}
+
+// ── Tribe panel ───────────────────────────────────────────────────────────────
+const descCache = {};
+
+function buildTribePanel() {
+  const tabs = document.getElementById('tp-tabs');
+  topCommIds.forEach((c,i) => {
+    const cm = GD.communities[c];
+    if(!cm) return;
+    const tab = document.createElement('div');
+    tab.className='tp-tab'; tab.dataset.c=c;
+    tab.textContent=cm.label;
+    tab.style.background=COLORS[i%COLORS.length]+'22';
+    tab.style.borderColor=COLORS[i%COLORS.length]+'44';
+    tab.addEventListener('click', () => openTribe(c));
+    tabs.appendChild(tab);
+  });
+  openTribe(topCommIds[0]);
+}
+
+function openTribe(c) {
+  const cm = GD.communities[c];
+  if(!cm) return;
+  const i = topCommIds.indexOf(c);
+  const color = COLORS[i%COLORS.length];
+
+  document.querySelectorAll('.tp-tab').forEach(el => {
+    const isThis = +el.dataset.c===c;
+    el.classList.toggle('sel', isThis);
+    el.style.background = isThis ? color : color+'22';
+    el.style.borderColor = isThis ? color : color+'44';
+    el.style.color = isThis ? '#08080f' : '';
+  });
+
+  document.getElementById('tp-tribe-name').textContent = cm.label;
+  document.getElementById('tp-tribe-meta').textContent = `${cm.size} artists · Community ${c}`;
+
+  const descEl = document.getElementById('tp-desc');
+  if(cm.description && cm.description.length > 10) {
+    descEl.classList.remove('loading');
+    descEl.textContent = cm.description;
+  } else if(descCache[c]) {
+    descEl.classList.remove('loading');
+    descEl.textContent = descCache[c];
+  } else {
+    descEl.classList.add('loading');
+    descEl.textContent = 'Analysing your taste…';
+    fetchDesc(c, cm.top_artists, cm.size);
+  }
+
+  const artistsEl = document.getElementById('tp-artists');
+  artistsEl.innerHTML='';
+  cm.all_artists.forEach(name => {
+    const pill = document.createElement('span');
+    pill.className='artist-pill';
+    pill.textContent=name;
+    artistsEl.appendChild(pill);
+  });
+
+  highlightComm(c);
+  setTimeout(() => zoomToComm(c), 400);
+}
+
+async function fetchDesc(cid, artists, size) {
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        model:'claude-sonnet-4-20250514', max_tokens:1000,
+        messages:[{role:'user', content:
+          `You are a music personality analyst. Based on this cluster of ${size} artists from a listener's Spotify library, write a 2-3 sentence personality profile revealing what this musical tribe says about the listener. Be specific and evocative — mention 2-3 artist names, describe the sonic character, and say something insightful about the personality behind this taste.\n\nTop artists: ${artists.join(', ')}\n\nRespond with ONLY the description, nothing else.`
+        }]
+      })
+    });
+    const data = await res.json();
+    const txt = data.content?.[0]?.text;
+    if(txt) {
+      descCache[cid]=txt;
+      const descEl=document.getElementById('tp-desc');
+      if(descEl) { descEl.classList.remove('loading'); descEl.textContent=txt; }
+    }
+  } catch(e) {
+    descCache[cid]=artists.slice(0,4).join(', ')+' and more.';
+  }
+}
+
+document.getElementById('tp-close').addEventListener('click', () => {
+  document.getElementById('tribe-panel').classList.remove('vis');
+  resetHL(); resetZoom();
+});
+
+// Keyboard navigation
+document.addEventListener('keydown', e => {
+  if(e.key==='ArrowRight'||e.key==='ArrowDown') navigate(1);
+  if(e.key==='ArrowLeft'||e.key==='ArrowUp') navigate(-1);
+});
+
+window.addEventListener('load', () => { buildNav(); initGraph(); });
+window.addEventListener('resize', () => {
+  const W=window.innerWidth, H=window.innerHeight;
+  d3.select('#gc').attr('width',W).attr('height',H);
+  sim.force('center',d3.forceCenter(W/2,H/2)).alpha(0.1).restart();
+});
+</script>
+</body>
+</html>
