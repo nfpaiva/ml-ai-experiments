@@ -86,6 +86,21 @@ body{background:var(--bg);color:var(--text);font-family:"DM Sans",sans-serif;ove
 /* ZOOM HINT */
 #zoom-hint{position:fixed;bottom:90px;left:50%;transform:translateX(-50%);font-family:"DM Mono",monospace;font-size:10px;letter-spacing:.1em;color:var(--muted);opacity:0;transition:opacity .5s;pointer-events:none;z-index:20}
 #zoom-hint.vis{opacity:1}
+
+/* DISCOVER PANEL */
+#disc-panel{position:fixed;right:0;top:0;width:420px;height:100vh;background:rgba(8,8,15,0.96);border-left:1px solid var(--border);z-index:15;display:flex;flex-direction:column;transform:translateX(100%);transition:transform .4s cubic-bezier(.16,1,.3,1);overflow:hidden}
+#disc-panel.vis{transform:translateX(0)}
+#dp-header{padding:24px 24px 16px;border-bottom:1px solid var(--border);flex-shrink:0}
+#dp-body{flex:1;overflow-y:auto;padding:16px 20px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;display:flex;flex-direction:column;gap:10px}
+.disc-card{background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:14px 16px;cursor:pointer;transition:border-color .2s,background .2s}
+.disc-card:hover{border-color:rgba(255,255,255,.22);background:#1f1f2e}
+.disc-rank{font-family:"DM Mono",monospace;font-size:9px;color:var(--muted);margin-bottom:3px}
+.disc-name{font-size:14px;font-weight:500;margin-bottom:7px}
+.disc-meta{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px}
+.disc-badge{font-family:"DM Mono",monospace;font-size:10px;padding:2px 7px;border-radius:8px}
+.disc-recs{font-size:11px;color:var(--muted);line-height:1.5}
+#dp-close{position:absolute;top:20px;right:20px;background:none;border:1px solid var(--border);color:var(--muted);width:28px;height:28px;border-radius:50%;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;transition:all .2s}
+#dp-close:hover{color:var(--text);border-color:rgba(255,255,255,.3)}
 </style>
 </head>
 <body>
@@ -112,6 +127,16 @@ body{background:var(--bg);color:var(--text);font-family:"DM Sans",sans-serif;ove
 </div>
 
 <div id="zoom-hint">scroll to zoom · drag to pan</div>
+
+<div id="disc-panel">
+  <button id="dp-close">×</button>
+  <div id="dp-header">
+    <div style="font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.15em;color:var(--accent);text-transform:uppercase;margin-bottom:8px">Act 06 — Discover</div>
+    <div style="font-size:16px;font-weight:600;margin-bottom:4px">Artists to Explore</div>
+    <div style="font-size:12px;color:var(--muted)">Ranked by how many of your artists recommend them · hover to highlight recommenders</div>
+  </div>
+  <div id="dp-body"></div>
+</div>
 
 <div id="tribe-panel">
   <button id="tp-close">×</button>
@@ -160,10 +185,15 @@ const ACT_CONTENT = [
     eyebrow: 'Act 05 — DNA',
     title: 'Your Musical DNA',
     body: 'Each tribe profiled by AI. The panel shows all artists per tribe with a personality description.<br><br><strong>Click any tribe tab</strong> — the graph zooms to that cluster automatically.'
+  },
+  {
+    eyebrow: 'Act 06 — Discover',
+    title: 'Artists You Might Love',
+    body: 'These artists appear repeatedly in the <em>similar artists</em> lists of your library — but you haven\'t saved them yet.<br><br><strong>Hover a card</strong> to highlight which of your artists are pulling you toward it.'
   }
 ];
 
-const ACT_LABELS = ['Universe','Tribes','Connectors','Depth','DNA'];
+const ACT_LABELS = ['Universe','Tribes','Connectors','Depth','DNA','Discover'];
 const topCommIds = Object.keys(GD.communities).map(Number);
 const commColorMap = {};
 topCommIds.forEach((c,i) => commColorMap[c] = i);
@@ -401,8 +431,17 @@ function goAct(a) {
     if(!panel.dataset.built) { buildTribePanel(); panel.dataset.built='1'; }
   } else {
     panel.classList.remove('vis');
-    if(highlighted !== null) { resetHL(); highlighted = null; }
-    resetZoom();
+    if(a !== 5 && highlighted !== null) { resetHL(); highlighted = null; }
+    if(a !== 5) resetZoom();
+  }
+
+  // Discover panel
+  const discPanel = document.getElementById('disc-panel');
+  if(a === 5) {
+    discPanel.classList.add('vis');
+    if(!discPanel.dataset.built) { buildDiscoverPanel(); discPanel.dataset.built='1'; }
+  } else {
+    discPanel.classList.remove('vis');
   }
 
   // Cluster forces act 1
@@ -524,6 +563,49 @@ document.getElementById('tp-close').addEventListener('click', () => {
   document.getElementById('tribe-panel').classList.remove('vis');
   resetHL(); resetZoom();
 });
+
+document.getElementById('dp-close').addEventListener('click', () => {
+  document.getElementById('disc-panel').classList.remove('vis');
+  resetHL();
+});
+
+// ── Discover panel ────────────────────────────────────────────────────────────
+function highlightNames(names) {
+  if(!names || !names.length) return;
+  const normSet = new Set(names.map(n => n.toLowerCase().trim()));
+  circSel.transition().duration(300)
+    .attr('opacity', d => normSet.has(d.name.toLowerCase().trim()) ? 1 : 0.04)
+    .attr('r', d => normSet.has(d.name.toLowerCase().trim()) ? Math.max(nodeR(d,act)+4, 8) : nodeR(d,act));
+  linkSel.transition().duration(300).attr('opacity', 0.02);
+}
+
+function buildDiscoverPanel() {
+  const body = document.getElementById('dp-body');
+  const discs = GD.discoveries || [];
+  if(!discs.length) {
+    body.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:20px 0">No discovery candidates found. Re-run the notebook to generate them.</div>';
+    return;
+  }
+  discs.forEach((d, i) => {
+    const tribeIdx = topCommIds.indexOf(d.probable_tribe_id);
+    const tribeColor = tribeIdx >= 0 ? COLORS[tribeIdx % COLORS.length] : 'rgba(255,255,255,0.4)';
+    const card = document.createElement('div');
+    card.className = 'disc-card';
+    card.innerHTML =
+      `<div class="disc-rank">#${i+1}</div>` +
+      `<div class="disc-name">${d.name}</div>` +
+      `<div class="disc-meta">` +
+        `<span class="disc-badge" style="background:rgba(124,106,240,.15);color:var(--accent)">score ${d.score.toFixed(3)}</span>` +
+        `<span class="disc-badge" style="background:rgba(78,205,196,.12);color:#4ecdc4">${d.recommender_count} fans in your library</span>` +
+        `<span style="font-size:10px;color:${tribeColor}">${d.probable_tribe}</span>` +
+      `</div>` +
+      `<div class="disc-recs">Recommended by: ${d.recommenders.slice(0,5).join(', ')}</div>`;
+    card.addEventListener('mouseenter', () => highlightNames(d.recommenders));
+    card.addEventListener('mouseleave', () => resetHL());
+    card.addEventListener('click', () => window.open(d.spotify_url, '_blank', 'noopener'));
+    body.appendChild(card);
+  });
+}
 
 // Keyboard navigation
 document.addEventListener('keydown', e => {
