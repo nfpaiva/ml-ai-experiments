@@ -128,8 +128,11 @@ function getTodaySessionFiles(forceRefresh = false) {
  *
  * Each JSONL line that contains `promptTokens` is treated as a billing event.
  * The function extracts:
- * - Actual request timestamp (from `j.v.requestTime` or `j.timestamp`; falls back to now)
- * - First 60 chars of the user's prompt (from the `<userRequest>…</userRequest>` block)
+ * - Actual request timestamp (from `j.v.requestTime`, `j.timestamp`, or `j.ts`)
+ * - First 60 chars of the user's prompt via a three-step fallback chain:
+ *     1. `<userRequest>` tag in `meta.renderedUserMessage`
+ *     2. Matching `kind:0` session header message at the same billing-event index
+ *     3. `(agent loop)` — internal automated turn with no user message
  * - Resolved model name
  * - Prompt and output token counts
  * - Credit cost (parsed from the `details` field after stripping multi-byte chars)
@@ -138,7 +141,7 @@ function getTodaySessionFiles(forceRefresh = false) {
  * @param {number} [fromByte=0] - Byte offset to start reading from.
  * @returns {{ requests: object[], newSize: number }} Parsed requests and updated file size.
  */
-function parseRequests(filePath, fromByte = 0) {
+function parseRequests(filePath, fromByte = 0, fallbackTime = null) {
     const requests = [];
     try {
         const stat = fs.statSync(filePath);
@@ -152,6 +155,33 @@ function parseRequests(filePath, fromByte = 0) {
 
         const lines = buf.toString('utf8').split('\n').filter(Boolean);
 
+        // First pass: collect kind:0 session header messages (and their timestamps) in
+        // file order. These carry the raw user message text and optionally the request
+        // time for each turn. Pushed unconditionally (null slots preserved) so that
+        // kindZeroMessages[i] and kindZeroTimes[i] stay in sync with billingEventIndex.
+        // Field paths are best-effort assumptions; silently ignored if wrong.
+        const kindZeroMessages = [];
+        const kindZeroTimes = [];
+        for (const line of lines) {
+            try {
+                if (!line.includes('"kind"')) continue;
+                const j = JSON.parse(line);
+                const kind = j?.kind ?? j?.v?.kind;
+                if (kind !== 0) continue;
+                const text = j?.message?.text
+                    ?? j?.v?.message?.text
+                    ?? j?.messages?.[0]?.text
+                    ?? j?.v?.messages?.[0]?.text
+                    ?? null;
+                kindZeroMessages.push(text ? String(text).trim().substring(0, 60) : null);
+                const rawT = j?.v?.requestTime ?? j?.v?.timestamp ?? j?.v?.time ?? j?.v?.createdAt
+                    ?? j?.requestTime ?? j?.timestamp ?? j?.ts ?? j?.time ?? j?.createdAt ?? null;
+                kindZeroTimes.push(rawT ? new Date(rawT) : null);
+            } catch { /* skip malformed lines */ }
+        }
+
+        let billingEventIndex = 0;
+
         for (const line of lines) {
             try {
                 // Quick pre-filter — skip lines that can't be billing events.
@@ -162,21 +192,31 @@ function parseRequests(filePath, fromByte = 0) {
                 const details = j?.v?.details || '';
                 if (!meta?.promptTokens) continue;
 
-                // Resolve actual event time. Try all known field locations:
-                //   j.v.requestTime  — Windows chatSessions format
-                //   j.timestamp      — ISO string top-level
-                //   j.ts             — Unix-ms top-level (debug-log format)
-                // If none are present, time is null — the seq field guarantees order.
-                const rawTime = j?.v?.requestTime ?? j?.timestamp ?? j?.ts;
-                const time = rawTime ? new Date(rawTime) : null;
+                // Resolve actual event time. Try all known field locations across
+                // different VS Code / Copilot JSONL schema variants, then fall back
+                // to the matching kind:0 header timestamp collected in the first pass.
+                // If nothing is found, use fallbackTime (set to now() when called from
+                // checkForNewRequests, so live-detected records always get a real time).
+                const rawTime = j?.v?.requestTime ?? j?.v?.timestamp ?? j?.v?.time ?? j?.v?.createdAt
+                    ?? j?.requestTime ?? j?.timestamp ?? j?.ts ?? j?.time ?? j?.createdAt ?? null;
+                const time = rawTime ? new Date(rawTime) : (kindZeroTimes[billingEventIndex] ?? fallbackTime);
 
-                // The rendered user message is an array of content blocks; the first
-                // text block contains the full prompt wrapped in an XML-like tag.
+                // Three-step prompt extraction:
+                //   1. <userRequest> tag in renderedUserMessage (primary, most reliable)
+                //   2. kind:0 header message at the same billing-event index (fallback)
+                //   3. '(agent loop)' — internal automated turn with no real user message
                 const userMsgBlock = meta?.renderedUserMessage?.[0]?.text || '';
                 const userRequestMatch = userMsgBlock.match(/<userRequest>\s*([\s\S]*?)\s*<\/userRequest>/);
-                const prompt = userRequestMatch
-                    ? userRequestMatch[1].trim().substring(0, 60)
-                    : '(no prompt text)';
+                let prompt;
+                let isAgentLoop = false;
+                if (userRequestMatch) {
+                    prompt = userRequestMatch[1].trim().substring(0, 60);
+                } else if (kindZeroMessages[billingEventIndex] != null) {
+                    prompt = kindZeroMessages[billingEventIndex];
+                } else {
+                    prompt = '(agent loop)';
+                    isAgentLoop = true;
+                }
 
                 // The `details` field uses multi-byte Unicode (e.g. bullet • → â€¢).
                 // Strip non-ASCII before applying the credits regex to avoid false negatives.
@@ -186,18 +226,62 @@ function parseRequests(filePath, fromByte = 0) {
                 requests.push({
                     time,
                     prompt,
+                    isAgentLoop,
                     model: (meta.resolvedModel || '').replace('claude-', '').replace(/-/g, ' '),
                     promptTokens: meta.promptTokens,
                     outputTokens: meta.outputTokens,
                     credits: creditsMatch ? parseFloat(creditsMatch[1]) : null,
                     creditsLabel: detailsAscii.replace(/\s+/g, ' ').trim()
                 });
+
+                billingEventIndex++;
             } catch { /* Malformed line — skip silently. */ }
         }
         return { requests, newSize: stat.size };
     } catch {
         return { requests, newSize: fromByte };
     }
+}
+
+/**
+ * Groups consecutive `(agent loop)` requests under the preceding user-initiated
+ * request. Returns an array of group objects, each with a `leader` (the user
+ * prompt) and zero or more `children` (agent loop turns that immediately followed).
+ *
+ * Groups with no children represent ordinary single-turn user prompts and are
+ * rendered as flat rows identical to the pre-grouping layout.
+ *
+ * @param {object[]} requests - Request objects in display order.
+ * @returns {{ leader: object, children: object[] }[]} Array of groups.
+ */
+function buildGroups(requests) {
+    // requests must be in CHRONOLOGICAL order (oldest first).
+    // Agent-loop turns are internal calls that fire before their parent billing
+    // event and therefore appear at a lower seq. Buffer them and attach to the
+    // NEXT non-agent-loop turn so they're shown as children of the user prompt
+    // that triggered them.
+    // Trailing agent loops with no following user prompt are attached to the
+    // last group (or become a standalone group if the list is entirely agent loops).
+    const groups = [];
+    let pending = [];   // buffered agent-loop turns waiting for the next leader
+    for (const r of requests) {
+        if (r.isAgentLoop) {
+            pending.push(r);
+        } else {
+            groups.push({ leader: r, children: pending });
+            pending = [];
+        }
+    }
+    // Flush any trailing agent-loop turns.
+    if (pending.length > 0) {
+        if (groups.length > 0) {
+            groups[groups.length - 1].children.push(...pending);
+        } else {
+            // Edge case: every entry in the file is an agent loop.
+            for (const r of pending) groups.push({ leader: r, children: [] });
+        }
+    }
+    return groups;
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +300,10 @@ function loadTodayHistory() {
     currentDay = new Date().toDateString();
     const files = getTodaySessionFiles(/* forceRefresh */ true);
     for (const f of files) {
-        const { requests, newSize } = parseRequests(f, 0);
+        // Use the file's last-modified time as fallback for records with no
+        // embedded timestamp — better than --:--:-- for startup history.
+        const fileMtime = (() => { try { return fs.statSync(f).mtime; } catch { return null; } })();
+        const { requests, newSize } = parseRequests(f, 0, fileMtime);
         requests.forEach(r => { r.seq = nextSeq++; });
         todayRequests.push(...requests);
         lastSeenSize[f] = newSize;
@@ -241,9 +328,10 @@ function checkForNewRequests() {
     // File list is re-fetched from disk at most once per FILE_LIST_CACHE_TTL_MS.
     const files = getTodaySessionFiles();
     let hasNew = false;
+    const detectionTime = new Date();
     for (const f of files) {
         const fromByte = lastSeenSize[f] || 0;
-        const { requests, newSize } = parseRequests(f, fromByte);
+        const { requests, newSize } = parseRequests(f, fromByte, detectionTime);
         if (requests.length > 0) {
             requests.forEach(r => { r.seq = nextSeq++; });
             todayRequests.push(...requests);
@@ -291,23 +379,76 @@ function renderPanel() {
     const totalIn = todayRequests.reduce((s, r) => s + (r.promptTokens || 0), 0);
     const totalOut = todayRequests.reduce((s, r) => s + (r.outputTokens || 0), 0);
 
-    const rows = [...todayRequests].reverse().map(r => {
-        const ratio = r.outputTokens > 0 ? Math.round(r.promptTokens / r.outputTokens) : '∞';
-        const creditsStr = r.credits != null ? r.credits.toFixed(1) : '?';
-        const timeStr = r.time
-            ? r.time.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    // Build groups in chronological order, then reverse for newest-first display.
+    // Agent loops are buffered and attached to the NEXT user prompt that follows
+    // them in time, so reversing after grouping keeps children with their parent.
+    const groups = buildGroups([...todayRequests]).reverse();
+
+    const rows = groups.map(({ leader, children }) => {
+        const timeStr = leader.time
+            ? leader.time.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
             : '--:--:--';
-        const safePrompt = escapeHtml(r.prompt);
-        return `<tr>
-            <td class="seq">#${r.seq + 1}</td>
+        const safePrompt = escapeHtml(leader.prompt);
+        const promptDisplay = leader.prompt.length >= 60 ? safePrompt + '…' : safePrompt;
+
+        if (children.length === 0) {
+            // Ordinary single-turn row — same layout as before grouping.
+            const ratio = leader.outputTokens > 0 ? Math.round(leader.promptTokens / leader.outputTokens) : '∞';
+            const creditsStr = leader.credits != null ? leader.credits.toFixed(1) : '?';
+            const creditClass = (leader.credits || 0) > 10 ? 'high' : (leader.credits || 0) > 5 ? 'med' : 'low';
+            return `<tr>
+            <td class="seq">#${leader.seq + 1}</td>
             <td class="time">${timeStr}</td>
-            <td class="prompt" title="${safePrompt}">${r.prompt.length >= 60 ? safePrompt + '…' : safePrompt}</td>
-            <td class="model">${escapeHtml(r.model)}</td>
-            <td class="num">${r.promptTokens.toLocaleString()}</td>
-            <td class="num">${r.outputTokens.toLocaleString()}</td>
+            <td class="prompt" title="${safePrompt}">${promptDisplay}</td>
+            <td class="model">${escapeHtml(leader.model)}</td>
+            <td class="num">${leader.promptTokens.toLocaleString()}</td>
+            <td class="num">${leader.outputTokens.toLocaleString()}</td>
             <td class="ratio">${ratio}x</td>
-            <td class="credits ${r.credits > 10 ? 'high' : r.credits > 5 ? 'med' : 'low'}">${creditsStr}</td>
+            <td class="credits ${creditClass}">${creditsStr}</td>
         </tr>`;
+        }
+
+        // Group row: collapsed by default, showing combined totals.
+        const all = [leader, ...children];
+        const grpIn = all.reduce((s, r) => s + (r.promptTokens || 0), 0);
+        const grpOut = all.reduce((s, r) => s + (r.outputTokens || 0), 0);
+        const grpCredits = all.reduce((s, r) => s + (r.credits || 0), 0);
+        const grpRatio = grpOut > 0 ? Math.round(grpIn / grpOut) : '∞';
+        const grpCreditsStr = grpCredits > 0 ? grpCredits.toFixed(1) : '?';
+        const grpCreditClass = grpCredits > 10 ? 'high' : grpCredits > 5 ? 'med' : 'low';
+        const gid = leader.seq;
+
+        const headerRow = `<tr class="group-header" onclick="toggleGroup(${gid})">
+            <td class="seq">#${leader.seq + 1}</td>
+            <td class="time">${timeStr}</td>
+            <td class="prompt" title="${safePrompt}"><span class="toggle" data-gid="${gid}">▶</span> ${promptDisplay} <span class="badge">${all.length} calls</span></td>
+            <td class="model">${escapeHtml(leader.model)}</td>
+            <td class="num">${grpIn.toLocaleString()}</td>
+            <td class="num">${grpOut.toLocaleString()}</td>
+            <td class="ratio">${grpRatio}x</td>
+            <td class="credits ${grpCreditClass}">${grpCreditsStr}</td>
+        </tr>`;
+
+        const childRows = children.map(c => {
+            const cTime = c.time
+                ? c.time.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                : '--:--:--';
+            const cRatio = c.outputTokens > 0 ? Math.round(c.promptTokens / c.outputTokens) : '∞';
+            const cCreditsStr = c.credits != null ? c.credits.toFixed(1) : '?';
+            const cCreditClass = (c.credits || 0) > 10 ? 'high' : (c.credits || 0) > 5 ? 'med' : 'low';
+            return `<tr class="group-child group-${gid}">
+            <td class="seq">#${c.seq + 1}</td>
+            <td class="time">${cTime}</td>
+            <td class="prompt"><span class="indent">↳</span> <em>(agent loop)</em></td>
+            <td class="model">${escapeHtml(c.model)}</td>
+            <td class="num">${c.promptTokens.toLocaleString()}</td>
+            <td class="num">${c.outputTokens.toLocaleString()}</td>
+            <td class="ratio">${cRatio}x</td>
+            <td class="credits ${cCreditClass}">${cCreditsStr}</td>
+        </tr>`;
+        }).join('');
+
+        return headerRow + childRows;
     }).join('');
 
     panel.webview.html = `<!DOCTYPE html>
@@ -340,6 +481,13 @@ function renderPanel() {
   td.credits.med { color: #ff9800; }
   td.credits.high { color: #f44336; }
   .empty { text-align: center; padding: 40px; color: var(--vscode-descriptionForeground); }
+  tr.group-header { cursor: pointer; background: var(--vscode-editorWidget-background); }
+  tr.group-header td.prompt { font-weight: 600; }
+  tr.group-child { display: none; }
+  tr.group-child td.prompt { color: var(--vscode-descriptionForeground); font-style: italic; }
+  .toggle { display: inline-block; font-size: 10px; margin-right: 4px; min-width: 10px; }
+  .badge { font-size: 10px; background: var(--vscode-badge-background, rgba(128,128,128,0.3)); color: var(--vscode-badge-foreground); border-radius: 8px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; font-weight: normal; }
+  .indent { color: var(--vscode-descriptionForeground); margin-right: 4px; }
 </style>
 </head>
 <body>
@@ -370,6 +518,16 @@ ${todayRequests.length === 0 ? '<div class="empty">No Copilot prompts recorded t
   </tr></thead>
   <tbody>${rows}</tbody>
 </table>`}
+<script>
+function toggleGroup(gid) {
+    var children = document.querySelectorAll('.group-' + gid);
+    var toggle = document.querySelector('[data-gid="' + gid + '"]');
+    if (!children.length) return;
+    var isVisible = window.getComputedStyle(children[0]).display !== 'none';
+    children.forEach(function(el) { el.style.display = isVisible ? 'none' : 'table-row'; });
+    if (toggle) toggle.textContent = isVisible ? '▶' : '▼';
+}
+</script>
 </body>
 </html>`;
 }

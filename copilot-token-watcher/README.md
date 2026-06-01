@@ -47,6 +47,7 @@ The extension runs in the **VS Code extension host on Windows**, so it correctly
 | **Click to open history** | Full webview panel with today's session breakdown |
 | **Summary cards** | Total prompts, tokens in/out, credits used, dollar cost |
 | **Per-prompt table** | `#` counter, time (`--:--:--` when unavailable), prompt snippet, model, tokens, input/output ratio, credits (colour-coded) |
+| **Agent loop grouping** | Consecutive internal agent-loop turns are collapsed under their parent user prompt. Click the `▶` row to expand/collapse. Combined totals and a call-count badge are shown on the group header. |
 | **Insight line** | % of tokens that were invisible context overhead vs. actual response |
 | **Auto-refresh** | New prompts detected within 5 seconds without re-scanning entire files |
 
@@ -109,9 +110,10 @@ Open VS Code → Extensions view (`Ctrl+Shift+X`) → `…` menu → **Install f
 3. **Click** the status bar item to open the full history panel.
 
 The panel shows:
-- Summary cards (prompts, tokens in/out, credits, cost)
+- Summary cards (prompts, tokens in/out, credits, cost) — based on all turns including agent loops
 - An insight line explaining context overhead
 - A per-prompt table with colour-coded credit usage
+- Agent loop turns grouped and collapsed under their parent prompt (click `▶` to expand)
 
 ---
 
@@ -124,7 +126,9 @@ The panel shows:
 | **Windows-only runtime** | Reads from `%APPDATA%`. The extension installs on any OS, but will only display data when running on Windows. |
 | **File list cache TTL** | The list of today's session files is refreshed from disk at most once per minute (not every poll). A brand-new chat thread created within the last minute may be missed until the cache expires. |
 | **Midnight boundary** | State resets automatically when the calendar day changes (detected on the next poll cycle). The final few seconds before midnight may technically be attributed to the new day. |
-| **Timestamp accuracy** | Event times are read from `j.v.requestTime`, `j.timestamp`, or `j.ts` fields in the JSONL data. If none is present, the time column shows `--:--:--`. Prompt order is always guaranteed by a sequential `#` counter that is independent of timestamps. |
+| **Timestamp accuracy** | Event times are resolved with a four-level fallback: (1) embedded JSONL field (`requestTime`, `timestamp`, `ts`, `time`, `createdAt` — tried on both `j.v.*` and top-level); (2) matching `kind:0` session header timestamp; (3) the session file's last-modified time (`mtime`) — applied to all records loaded at startup, so every row shows a real clock time rather than `--:--:--`; (4) `new Date()` at poll-detection time for records discovered while the extension is already running (accurate to ±5 s). The time column shows `--:--:--` only if all four sources fail. Prompt order is always guaranteed by the sequential `#` counter independently of timestamps. |
+| **Prompt text extraction** | The parser tries three sources in order: (1) `<userRequest>` tag in `renderedUserMessage`, (2) matching `kind:0` session header message, (3) labels the turn `(agent loop)` if no user text is found. The `kind:0` field paths are inferred from the Windows chatSessions format and may not match on all VS Code versions. |
+| **Agent loop grouping** | Grouping is purely positional — any billing event with no extractable user text that immediately follows a user prompt is treated as an agent loop. A misidentified row will appear as an `(agent loop)` child of the wrong group. |
 
 ---
 
