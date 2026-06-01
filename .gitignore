@@ -1,0 +1,28 @@
+# Secrets — never commit
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# MLflow
+mlruns/
+mlflow/mlruns/
+
+# Build artefacts
+build/
+dist/
+*.egg-info/
+
+# VS Code Extension build artefacts (copilot-token-watcher)
+copilot-token-watcher/node_modules/
+copilot-token-watcher/*.vsix
+
