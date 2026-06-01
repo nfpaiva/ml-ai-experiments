@@ -52,6 +52,9 @@ let fileListCachedAt = 0;
 /** Date string (e.g. "Mon Jun 01 2026") used to detect midnight rollover. */
 let currentDay = new Date().toDateString();
 
+/** YYYY-MM-DD string of the date currently shown in the panel. Defaults to today. */
+let selectedDateStr = new Date().toISOString().split('T')[0];
+
 /** Monotonically increasing counter assigned to each parsed request. Guarantees
  *  stable display order even when no real timestamp is available in the JSONL. */
 let nextSeq = 0;
@@ -223,6 +226,36 @@ function parseRequests(filePath, fromByte = 0, fallbackTime = null) {
                 const detailsAscii = details.replace(/[^\x00-\x7F]/g, '');
                 const creditsMatch = detailsAscii.match(/([\d.]+)\s*credits/i);
 
+                // Build context breakdown: each XML section in renderedUserMessage
+                // gets a { label, charCount } entry. Token estimates (charCount/4)
+                // and percentages are computed at render time, not stored here.
+                const breakdown = [];
+                const extractSection = (tag, label) => {
+                    const m = userMsgBlock.match(new RegExp(`<${tag}(?:[^>]*)>([\\s\\S]*?)<\\/${tag}>`, ''));
+                    if (m) breakdown.push({ label, charCount: m[1].length });
+                };
+                // Named single-instance tags
+                extractSection('userRequest',          'Your prompt');
+                extractSection('workspace_info',       'Workspace tree');
+                extractSection('availableDeferredTools','Tool schemas (MCP)');
+                extractSection('editorContext',        'Open file / notebook');
+                extractSection('reminderInstructions', 'System instructions');
+                // Attachments — multiple per message, each with an id attribute
+                for (const am of userMsgBlock.matchAll(/<attachment\s+id="([^"]*)"[^>]*>([\s\S]*?)<\/attachment>/g)) {
+                    breakdown.push({ label: `File: ${am[1]}`, charCount: am[2].length });
+                }
+                // contentReferences array — auto-injected instruction files
+                if (Array.isArray(meta.contentReferences)) {
+                    for (const ref of meta.contentReferences) {
+                        const refLabel = ref.uri ?? ref.name ?? ref.path ?? JSON.stringify(ref);
+                        breakdown.push({ label: `Instructions: ${String(refLabel).split('/').pop()}`, charCount: JSON.stringify(ref).length });
+                    }
+                }
+                // Remainder — chars not accounted for by tagged sections
+                const taggedChars = breakdown.reduce((s, b) => s + b.charCount, 0);
+                const remainder = userMsgBlock.length - taggedChars;
+                if (remainder > 50) breakdown.push({ label: 'Other / untagged', charCount: remainder });
+
                 requests.push({
                     time,
                     prompt,
@@ -231,7 +264,8 @@ function parseRequests(filePath, fromByte = 0, fallbackTime = null) {
                     promptTokens: meta.promptTokens,
                     outputTokens: meta.outputTokens,
                     credits: creditsMatch ? parseFloat(creditsMatch[1]) : null,
-                    creditsLabel: detailsAscii.replace(/\s+/g, ' ').trim()
+                    creditsLabel: detailsAscii.replace(/\s+/g, ' ').trim(),
+                    breakdown
                 });
 
                 billingEventIndex++;
@@ -298,6 +332,7 @@ function loadTodayHistory() {
     lastSeenSize = {};  // Prunes stale byte-offset entries from the previous day.
     nextSeq = 0;
     currentDay = new Date().toDateString();
+    selectedDateStr = new Date().toISOString().split('T')[0];
     const files = getTodaySessionFiles(/* forceRefresh */ true);
     for (const f of files) {
         // Use the file's last-modified time as fallback for records with no
@@ -306,6 +341,48 @@ function loadTodayHistory() {
         const { requests, newSize } = parseRequests(f, 0, fileMtime);
         requests.forEach(r => { r.seq = nextSeq++; });
         todayRequests.push(...requests);
+        lastSeenSize[f] = newSize;
+    }
+    todayRequests.sort((a, b) => a.seq - b.seq);
+    updateStatusBar();
+}
+
+/**
+ * Loads request history for a specific calendar day (YYYY-MM-DD).
+ * Scans all session files with mtime on or after that day, parses them fully,
+ * then filters to only requests whose timestamp falls within that exact day.
+ * Called when the user selects a date from the panel date picker.
+ *
+ * @param {string} dateStr - ISO date string, e.g. "2026-06-01".
+ */
+function loadHistoryForDate(dateStr) {
+    selectedDateStr = dateStr;
+    const dayStart = new Date(dateStr + 'T00:00:00');
+    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+    todayRequests = [];
+    lastSeenSize = {};
+    nextSeq = 0;
+    const files = [];
+    try {
+        const workspaceFolders = fs.readdirSync(SESSION_BASE);
+        for (const folder of workspaceFolders) {
+            const chatDir = path.join(SESSION_BASE, folder, 'chatSessions');
+            if (!fs.existsSync(chatDir)) continue;
+            const jsonlFiles = fs.readdirSync(chatDir).filter(f => f.endsWith('.jsonl'));
+            for (const file of jsonlFiles) {
+                const fp = path.join(chatDir, file);
+                try {
+                    if (fs.statSync(fp).mtime >= dayStart) files.push(fp);
+                } catch { /* unreadable — skip */ }
+            }
+        }
+    } catch { /* SESSION_BASE may not exist; silently skip. */ }
+    for (const f of files) {
+        const fileMtime = (() => { try { return fs.statSync(f).mtime; } catch { return null; } })();
+        const { requests, newSize } = parseRequests(f, 0, fileMtime);
+        const filtered = requests.filter(r => r.time && r.time >= dayStart && r.time < dayEnd);
+        filtered.forEach(r => { r.seq = nextSeq++; });
+        todayRequests.push(...filtered);
         lastSeenSize[f] = newSize;
     }
     todayRequests.sort((a, b) => a.seq - b.seq);
@@ -324,6 +401,10 @@ function checkForNewRequests() {
         if (panel) renderPanel();
         return;
     }
+
+    // Only live-update when the panel is showing today's data.
+    const _todayStr = new Date().toISOString().split('T')[0];
+    if (selectedDateStr !== _todayStr) return;
 
     // File list is re-fetched from disk at most once per FILE_LIST_CACHE_TTL_MS.
     const files = getTodaySessionFiles();
@@ -379,10 +460,29 @@ function renderPanel() {
     const totalIn = todayRequests.reduce((s, r) => s + (r.promptTokens || 0), 0);
     const totalOut = todayRequests.reduce((s, r) => s + (r.outputTokens || 0), 0);
 
+    const _now = new Date();
+    const _toDs = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const minDate = _toDs(new Date(_now.getFullYear(), _now.getMonth(), 1));
+    const maxDate = _toDs(new Date(_now.getFullYear(), _now.getMonth() + 1, 0));
+    const isToday = selectedDateStr === _toDs(_now);
+    const dispDate = new Date(selectedDateStr + 'T00:00:00');
+    const dateLabel = dispDate.toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
     // Build groups in chronological order, then reverse for newest-first display.
     // Agent loops are buffered and attached to the NEXT user prompt that follows
     // them in time, so reversing after grouping keeps children with their parent.
     const groups = buildGroups([...todayRequests]).reverse();
+
+    // Helper: compute HIST% cell HTML for a single request row.
+    // histPct = (billed promptTokens - estimated tagged chars/4) / promptTokens.
+    // Represents conversation history (prior turns) as % of total input context.
+    const histCellHtml = (r) => {
+        const te = Math.round((r.breakdown || []).reduce((s, b) => s + b.charCount, 0) / 4);
+        const hp = r.promptTokens > 0 ? (r.promptTokens - te) / r.promptTokens * 100 : 0;
+        const cls = hp >= 90 ? 'hist-high' : hp >= 60 ? 'hist-mid' : 'hist-low';
+        const warn = hp >= 90 ? '<span title="Conversation history &gt;90% of context \u2014 start a new chat to reduce costs.">\u26a0</span>\u202f' : '';
+        return `<td class="hist ${cls}">${warn}${hp.toFixed(1)}%</td>`;
+    };
 
     const rows = groups.map(({ leader, children }) => {
         const timeStr = leader.time
@@ -396,7 +496,7 @@ function renderPanel() {
             const ratio = leader.outputTokens > 0 ? Math.round(leader.promptTokens / leader.outputTokens) : '∞';
             const creditsStr = leader.credits != null ? leader.credits.toFixed(1) : '?';
             const creditClass = (leader.credits || 0) > 10 ? 'high' : (leader.credits || 0) > 5 ? 'med' : 'low';
-            return `<tr>
+            return `<tr class="data-row" data-seq="${leader.seq}" data-ptokens="${leader.promptTokens}" data-time="${leader.time ? leader.time.getTime() : 0}" onclick="rowClick(event,this)">
             <td class="seq">#${leader.seq + 1}</td>
             <td class="time">${timeStr}</td>
             <td class="prompt" title="${safePrompt}">${promptDisplay}</td>
@@ -405,6 +505,7 @@ function renderPanel() {
             <td class="num">${leader.outputTokens.toLocaleString()}</td>
             <td class="ratio">${ratio}x</td>
             <td class="credits ${creditClass}">${creditsStr}</td>
+            ${histCellHtml(leader)}
         </tr>`;
         }
 
@@ -418,7 +519,7 @@ function renderPanel() {
         const grpCreditClass = grpCredits > 10 ? 'high' : grpCredits > 5 ? 'med' : 'low';
         const gid = leader.seq;
 
-        const headerRow = `<tr class="group-header" onclick="toggleGroup(${gid})">
+        const headerRow = `<tr class="group-header data-row" data-seq="${leader.seq}" data-ptokens="${leader.promptTokens}" data-time="${leader.time ? leader.time.getTime() : 0}" onclick="rowClick(event,this,${gid})">
             <td class="seq">#${leader.seq + 1}</td>
             <td class="time">${timeStr}</td>
             <td class="prompt" title="${safePrompt}"><span class="toggle" data-gid="${gid}">▶</span> ${promptDisplay} <span class="badge">${all.length} calls</span></td>
@@ -427,6 +528,7 @@ function renderPanel() {
             <td class="num">${grpOut.toLocaleString()}</td>
             <td class="ratio">${grpRatio}x</td>
             <td class="credits ${grpCreditClass}">${grpCreditsStr}</td>
+            ${histCellHtml(leader)}
         </tr>`;
 
         const childRows = children.map(c => {
@@ -436,7 +538,7 @@ function renderPanel() {
             const cRatio = c.outputTokens > 0 ? Math.round(c.promptTokens / c.outputTokens) : '∞';
             const cCreditsStr = c.credits != null ? c.credits.toFixed(1) : '?';
             const cCreditClass = (c.credits || 0) > 10 ? 'high' : (c.credits || 0) > 5 ? 'med' : 'low';
-            return `<tr class="group-child group-${gid}">
+            return `<tr class="group-child group-${gid} data-row" data-seq="${c.seq}" data-ptokens="${c.promptTokens}" data-time="${c.time ? c.time.getTime() : 0}" data-parent-seq="${gid}" onclick="rowClick(event,this)">
             <td class="seq">#${c.seq + 1}</td>
             <td class="time">${cTime}</td>
             <td class="prompt"><span class="indent">↳</span> <em>(agent loop)</em></td>
@@ -445,6 +547,7 @@ function renderPanel() {
             <td class="num">${c.outputTokens.toLocaleString()}</td>
             <td class="ratio">${cRatio}x</td>
             <td class="credits ${cCreditClass}">${cCreditsStr}</td>
+            ${histCellHtml(c)}
         </tr>`;
         }).join('');
 
@@ -459,7 +562,10 @@ function renderPanel() {
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', system-ui, sans-serif; font-size: 13px; background: var(--vscode-editor-background); color: var(--vscode-editor-foreground); padding: 20px; }
   h1 { font-size: 16px; font-weight: 600; margin-bottom: 4px; color: var(--vscode-editor-foreground); }
-  .subtitle { font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 20px; }
+  .subtitle { font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 0; }
+  .date-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  input[type="date"] { background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, #555); border-radius: 4px; padding: 4px 8px; font-size: 12px; font-family: inherit; cursor: pointer; color-scheme: dark; }
+  input[type="date"]:focus { outline: 1px solid var(--vscode-focusBorder, #007acc); }
   .summary { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
   .card { background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-editorWidget-border, #444); border-radius: 6px; padding: 12px 18px; min-width: 140px; }
   .card .label { font-size: 11px; color: var(--vscode-descriptionForeground); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
@@ -481,18 +587,48 @@ function renderPanel() {
   td.credits.med { color: #ff9800; }
   td.credits.high { color: #f44336; }
   .empty { text-align: center; padding: 40px; color: var(--vscode-descriptionForeground); }
-  tr.group-header { cursor: pointer; background: var(--vscode-editorWidget-background); }
+  tr.data-row { cursor: pointer; }
+  tr.group-header { background: var(--vscode-editorWidget-background); }
   tr.group-header td.prompt { font-weight: 600; }
   tr.group-child { display: none; }
   tr.group-child td.prompt { color: var(--vscode-descriptionForeground); font-style: italic; }
   .toggle { display: inline-block; font-size: 10px; margin-right: 4px; min-width: 10px; }
   .badge { font-size: 10px; background: var(--vscode-badge-background, rgba(128,128,128,0.3)); color: var(--vscode-badge-foreground); border-radius: 8px; padding: 1px 6px; margin-left: 6px; vertical-align: middle; font-weight: normal; }
   .indent { color: var(--vscode-descriptionForeground); margin-right: 4px; }
+  #breakdown-panel { display: none; position: sticky; bottom: 0; background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-editorWidget-border, #444); border-radius: 6px; padding: 14px 16px; margin-top: 20px; }
+  .bk-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .bk-title { font-size: 13px; font-weight: 600; color: var(--vscode-editor-foreground); }
+  .bk-close { background: none; border: none; color: var(--vscode-descriptionForeground); font-size: 16px; cursor: pointer; padding: 0 4px; line-height: 1; }
+  .bk-close:hover { color: var(--vscode-editor-foreground); }
+  .bk-note { font-size: 11px; color: var(--vscode-descriptionForeground); margin-bottom: 10px; }
+  #bk-table { font-size: 12px; }
+  #bk-table th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--vscode-descriptionForeground); padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--vscode-editorWidget-border, #444); }
+  #bk-table td { padding: 5px 8px; border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.15)); }
+  #bk-table td.bk-num { font-family: monospace; text-align: right; }
+  #bk-table td.bk-pct { font-family: monospace; text-align: right; min-width: 52px; }
+  #bk-table td.bk-bar-cell { width: 120px; padding-right: 12px; }
+  .bk-bar-bg { background: var(--vscode-editorWidget-border, rgba(128,128,128,0.2)); border-radius: 3px; height: 6px; width: 100%; }
+  .bk-bar-fill { height: 6px; border-radius: 3px; background: var(--vscode-progressBar-background, #3794ff); }
+  tr.bk-amber { background: rgba(255,152,0,0.12); }
+  tr.bk-red { background: rgba(244,67,54,0.14); }
+  tr.bk-history td:first-child { color: var(--vscode-descriptionForeground); }
+  tr.bk-history { border-top: 1px dashed var(--vscode-editorWidget-border, #666); }
+  .bk-footer { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 8px; border-top: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.2)); padding-top: 6px; }
+  th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+  th.sortable:hover { color: var(--vscode-editor-foreground); }
+  .sort-ind { font-size: 9px; margin-left: 2px; }
+  td.hist { font-family: monospace; text-align: right; font-size: 11px; white-space: nowrap; }
+  td.hist-low { color: #4caf50; }
+  td.hist-mid { color: #ff9800; }
+  td.hist-high { color: #f44336; font-weight: 600; }
 </style>
 </head>
 <body>
 <h1>Copilot Token Watcher</h1>
-<p class="subtitle">Today's session — ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
+<div class="date-bar">
+  <p class="subtitle">${isToday ? 'Today\u2019s session \u2014 ' : ''}${escapeHtml(dateLabel)}</p>
+  <input type="date" id="date-picker" min="${minDate}" max="${maxDate}" value="${selectedDateStr}">
+</div>
 
 <div class="summary">
   <div class="card"><div class="label">Prompts</div><div class="value">${todayRequests.length}</div></div>
@@ -503,29 +639,133 @@ function renderPanel() {
 </div>
 
 ${totalIn > 0 ? `<div class="insight">
-  💡 ${((totalIn / (totalIn + totalOut)) * 100).toFixed(1)}% of all tokens today were <strong>input context overhead</strong> — not your actual responses.
+  💡 ${((totalIn / (totalIn + totalOut)) * 100).toFixed(1)}% of all tokens ${isToday ? 'today' : 'on this day'} were <strong>input context overhead</strong> — not your actual responses.
   Average input per prompt: <strong>${Math.round(totalIn / todayRequests.length).toLocaleString()} tokens</strong>.
 </div>` : ''}
 
-${todayRequests.length === 0 ? '<div class="empty">No Copilot prompts recorded today yet.</div>' : `
+${todayRequests.length === 0 ? `<div class="empty">No Copilot prompts recorded ${isToday ? 'today' : 'on this date'} yet.</div>` : `
 <table>
   <thead><tr>
-    <th>#</th><th>Time</th><th>Prompt</th><th>Model</th>
+    <th class="sortable" onclick="sortBy('seq')"># <span class="sort-ind" id="si-seq"></span></th>
+    <th class="sortable" onclick="sortBy('time')">Time <span class="sort-ind" id="si-time"></span></th>
+    <th>Prompt</th><th>Model</th>
     <th style="text-align:right">In</th>
     <th style="text-align:right">Out</th>
     <th style="text-align:right">Ratio</th>
     <th style="text-align:right">Credits</th>
+    <th style="text-align:right">Hist %</th>
   </tr></thead>
   <tbody>${rows}</tbody>
-</table>`}
+</table>
+
+<div id="breakdown-panel">
+  <div class="bk-header">
+    <span class="bk-title">Context breakdown &mdash; <span id="bk-seq"></span></span>
+    <button class="bk-close" onclick="closeBreakdown()">&#x2715;</button>
+  </div>
+  <div class="bk-note">Token estimates are approximate (chars &divide; 4). Click any row to inspect its context.</div>
+  <table id="bk-table">
+    <thead><tr><th>Section</th><th style="text-align:right">Est. tokens</th><th style="text-align:right">% of input</th><th>Usage</th></tr></thead>
+    <tbody id="bk-body"></tbody>
+  </table>
+  <div class="bk-footer" id="bk-footer"></div>
+</div>`}
 <script>
+const BREAKDOWNS = ${JSON.stringify(
+    todayRequests.reduce((m, r) => { m[r.seq] = r.breakdown || []; return m; }, {})
+)};
+var _sortKey = '';
+var _sortDir = -1;
+function sortBy(key) {
+    if (_sortKey === key) { _sortDir *= -1; } else { _sortKey = key; _sortDir = -1; }
+    var tbody = document.querySelector('table:not(#bk-table) tbody');
+    if (!tbody) return;
+    var allRows = Array.from(tbody.querySelectorAll('tr'));
+    var units = [];
+    allRows.forEach(function(tr) {
+        var ps = tr.dataset.parentSeq;
+        if (ps !== undefined) {
+            var parent = units.find(function(u) { return String(u.leader.dataset.seq) === ps; });
+            if (parent) { parent.children.push(tr); return; }
+        }
+        units.push({ leader: tr, children: [] });
+    });
+    units.sort(function(a, b) {
+        var av = parseInt(a.leader.dataset[key] || 0, 10);
+        var bv = parseInt(b.leader.dataset[key] || 0, 10);
+        if (av !== bv) return (av - bv) * _sortDir;
+        return (parseInt(b.leader.dataset.seq, 10) - parseInt(a.leader.dataset.seq, 10));
+    });
+    units.forEach(function(u) {
+        tbody.appendChild(u.leader);
+        u.children.forEach(function(c) { tbody.appendChild(c); });
+    });
+    ['seq', 'time'].forEach(function(k) {
+        var el = document.getElementById('si-' + k);
+        if (el) el.textContent = k === _sortKey ? (_sortDir === -1 ? '\u25bc' : '\u25b2') : '';
+    });
+}
 function toggleGroup(gid) {
     var children = document.querySelectorAll('.group-' + gid);
     var toggle = document.querySelector('[data-gid="' + gid + '"]');
     if (!children.length) return;
     var isVisible = window.getComputedStyle(children[0]).display !== 'none';
     children.forEach(function(el) { el.style.display = isVisible ? 'none' : 'table-row'; });
-    if (toggle) toggle.textContent = isVisible ? '▶' : '▼';
+    if (toggle) toggle.textContent = isVisible ? '\u25b6' : '\u25bc';
+}
+function rowClick(event, tr, gid) {
+    if (gid !== undefined) toggleGroup(gid);
+    var seq = parseInt(tr.dataset.seq, 10);
+    var ptokens = parseInt(tr.dataset.ptokens, 10);
+    showBreakdown(seq, ptokens);
+}
+function showBreakdown(seq, promptTokens) {
+    var items = BREAKDOWNS[seq];
+    if (!items || !items.length) {
+        document.getElementById('breakdown-panel').style.display = 'none';
+        return;
+    }
+    document.getElementById('bk-seq').textContent = '#' + (seq + 1);
+    var totalEst = 0;
+    var bodyHtml = items.map(function(item) {
+        var est = Math.round(item.charCount / 4);
+        totalEst += est;
+        var pct = promptTokens > 0 ? (est / promptTokens * 100) : 0;
+        var cls = pct > 40 ? 'bk-red' : pct > 20 ? 'bk-amber' : '';
+        var barPct = Math.min(pct, 100).toFixed(1);
+        return '<tr class="' + cls + '"><td>' + item.label + '</td>' +
+            '<td class="bk-num">' + est.toLocaleString() + '</td>' +
+            '<td class="bk-pct">' + pct.toFixed(1) + '%</td>' +
+            '<td class="bk-bar-cell"><div class="bk-bar-bg"><div class="bk-bar-fill" style="width:' + barPct + '%"></div></div></td></tr>';
+    }).join('');
+    // Conversation history: the gap between billed tokens and what renderedUserMessage accounts for.
+    // This is the dominant cost on long sessions — all prior turns sent to the model on every request.
+    var history = promptTokens - totalEst;
+    if (history > 0) {
+        var histPct = (history / promptTokens * 100);
+        var histCls = histPct > 40 ? 'bk-red' : histPct > 20 ? 'bk-amber' : '';
+        var histBarPct = Math.min(histPct, 100).toFixed(1);
+        bodyHtml += '<tr class="' + histCls + ' bk-history"><td><em>Conversation history (prior turns)</em></td>' +
+            '<td class="bk-num">' + history.toLocaleString() + '</td>' +
+            '<td class="bk-pct">' + histPct.toFixed(1) + '%</td>' +
+            '<td class="bk-bar-cell"><div class="bk-bar-bg"><div class="bk-bar-fill" style="width:' + histBarPct + '%"></div></div></td></tr>';
+    }
+    document.getElementById('bk-body').innerHTML = bodyHtml;
+    document.getElementById('bk-footer').textContent =
+        'The IN column (' + promptTokens.toLocaleString() + ' tokens) is the full context sent to the model. ' +
+        'Conversation history is billed tokens minus what renderedUserMessage accounts for (' + totalEst.toLocaleString() + ' tokens estimated).';
+    document.getElementById('breakdown-panel').style.display = 'block';
+}
+function closeBreakdown() {
+    document.getElementById('breakdown-panel').style.display = 'none';
+}
+sortBy('time');
+const _vscode = acquireVsCodeApi();
+var _datePicker = document.getElementById('date-picker');
+if (_datePicker) {
+    _datePicker.addEventListener('change', function() {
+        _vscode.postMessage({ command: 'selectDate', date: this.value });
+    });
 }
 </script>
 </body>
@@ -559,6 +799,20 @@ function activate(context) {
                     { enableScripts: true }
                 );
                 panel.onDidDispose(() => { panel = null; });
+                panel.webview.onDidReceiveMessage(msg => {
+                    if (msg.command === 'selectDate' && typeof msg.date === 'string') {
+                        if (!/^\d{4}-\d{2}-\d{2}$/.test(msg.date)) return;
+                        const d = new Date(msg.date + 'T00:00:00');
+                        if (isNaN(d.getTime())) return;
+                        const _now = new Date();
+                        const _min = new Date(_now.getFullYear(), _now.getMonth(), 1);
+                        const _max = new Date(_now.getFullYear(), _now.getMonth() + 1, 0);
+                        _max.setHours(23, 59, 59, 999);
+                        if (d < _min || d > _max) return;
+                        loadHistoryForDate(msg.date);
+                        renderPanel();
+                    }
+                });
             }
             renderPanel();
             panel.reveal();
