@@ -1,0 +1,23 @@
+{
+  "name": "copilot-token-watcher",
+  "displayName": "Copilot Token Watcher",
+  "description": "Shows GitHub Copilot token usage and AI credit cost per prompt in the status bar",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": { "vscode": "^1.80.0" },
+  "extensionKind": ["ui"],
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "copilotTokenWatcher.showHistory",
+        "title": "Copilot Token Watcher: Show Today's History"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^2.24.0"
+  }
+}
