@@ -29,6 +29,97 @@ const SESSION_BASE = path.join(APPDATA, 'Code', 'User', 'workspaceStorage');
 /** How often (ms) to poll for new requests. 5 s is responsive without hammering disk. */
 const POLL_INTERVAL_MS = 5_000;
 
+// ---------------------------------------------------------------------------
+// Tool group classifier
+// ---------------------------------------------------------------------------
+
+/**
+ * Static lookup table for VS Code built-in / extension tools.
+ * Key = exact tool name as it appears in <availableDeferredTools>.
+ * Value = { group, actionable } where actionable is null for irreducible tools.
+ * Any tool name NOT in this table falls to 'VS Code core' (safe default).
+ * MCP tools (prefix mcp_<server>_) are auto-classified by server name — no entry needed here.
+ */
+const TOOL_GROUPS = {
+    // ── GitHub Pull Requests extension (vscode-pull-request-github) ──────────
+    'github-pull-request_currentActivePullRequest': { group: 'GitHub PR ext',    actionable: 'disable ext when not reviewing PRs' },
+    'github-pull-request_issue_fetch':              { group: 'GitHub PR ext',    actionable: 'disable ext when not reviewing PRs' },
+    'github-pull-request_doSearch':                 { group: 'GitHub PR ext',    actionable: 'disable ext when not reviewing PRs' },
+    'github-pull-request_labels_fetch':             { group: 'GitHub PR ext',    actionable: 'disable ext when not reviewing PRs' },
+    'github-pull-request_notification_fetch':       { group: 'GitHub PR ext',    actionable: 'disable ext when not reviewing PRs' },
+    'github-pull-request_pullRequestInViewport':    { group: 'GitHub PR ext',    actionable: 'disable ext when not reviewing PRs' },
+    'github-pull-request_pullRequestStatusChecks':  { group: 'GitHub PR ext',    actionable: 'disable ext when not reviewing PRs' },
+    'github-pull-request_resolveReviewThread':      { group: 'GitHub PR ext',    actionable: 'disable ext when not reviewing PRs' },
+    'github-pull-request_create_pull_request':      { group: 'GitHub PR ext',    actionable: 'disable ext when not reviewing PRs' },
+    'github_repo':                                  { group: 'GitHub PR ext',    actionable: 'disable ext when not reviewing PRs' },
+    'github_text_search':                           { group: 'GitHub PR ext',    actionable: 'disable ext when not reviewing PRs' },
+    // ── Jupyter / notebook extension ─────────────────────────────────────────
+    'copilot_getNotebookSummary':                   { group: 'Jupyter ext',      actionable: 'disable ext when not using notebooks' },
+    'configure_non_python_notebook':                { group: 'Jupyter ext',      actionable: 'disable ext when not using notebooks' },
+    'configure_python_notebook':                    { group: 'Jupyter ext',      actionable: 'disable ext when not using notebooks' },
+    'configure_notebook':                           { group: 'Jupyter ext',      actionable: 'disable ext when not using notebooks' },
+    'edit_notebook_file':                           { group: 'Jupyter ext',      actionable: 'disable ext when not using notebooks' },
+    'read_notebook_cell_output':                    { group: 'Jupyter ext',      actionable: 'disable ext when not using notebooks' },
+    'restart_notebook_kernel':                      { group: 'Jupyter ext',      actionable: 'disable ext when not using notebooks' },
+    'run_notebook_cell':                            { group: 'Jupyter ext',      actionable: 'disable ext when not using notebooks' },
+    'notebook_install_packages':                    { group: 'Jupyter ext',      actionable: 'disable ext when not using notebooks' },
+    'notebook_list_packages':                       { group: 'Jupyter ext',      actionable: 'disable ext when not using notebooks' },
+    'create_new_jupyter_notebook':                  { group: 'Jupyter ext',      actionable: 'disable ext when not using notebooks' },
+    // ── Browser / Playwright tools ────────────────────────────────────────────
+    'open_browser_page':                            { group: 'Browser tools',    actionable: 'disable if not doing web/UI work' },
+    'click_element':                                { group: 'Browser tools',    actionable: 'disable if not doing web/UI work' },
+    'drag_element':                                 { group: 'Browser tools',    actionable: 'disable if not doing web/UI work' },
+    'hover_element':                                { group: 'Browser tools',    actionable: 'disable if not doing web/UI work' },
+    'navigate_page':                                { group: 'Browser tools',    actionable: 'disable if not doing web/UI work' },
+    'screenshot_page':                              { group: 'Browser tools',    actionable: 'disable if not doing web/UI work' },
+    'read_page':                                    { group: 'Browser tools',    actionable: 'disable if not doing web/UI work' },
+    'type_in_page':                                 { group: 'Browser tools',    actionable: 'disable if not doing web/UI work' },
+    'handle_dialog':                                { group: 'Browser tools',    actionable: 'disable if not doing web/UI work' },
+    'run_playwright_code':                          { group: 'Browser tools',    actionable: 'disable if not doing web/UI work' },
+    // ── Python environment tools ──────────────────────────────────────────────
+    'configure_python_environment':                 { group: 'Python env tools', actionable: 'disable if not doing Python work' },
+    'get_python_environment_details':               { group: 'Python env tools', actionable: 'disable if not doing Python work' },
+    'get_python_executable_details':                { group: 'Python env tools', actionable: 'disable if not doing Python work' },
+    'install_python_packages':                      { group: 'Python env tools', actionable: 'disable if not doing Python work' },
+    // ── VS Code core — always present, cannot be removed ─────────────────────
+    // Listed here only for documentation. Unknown tools also fall to 'VS Code core'.
+    'create_directory':          { group: 'VS Code core', actionable: null },
+    'create_new_workspace':      { group: 'VS Code core', actionable: null },
+    'create_and_run_task':       { group: 'VS Code core', actionable: null },
+    'get_task_output':           { group: 'VS Code core', actionable: null },
+    'get_vscode_api':            { group: 'VS Code core', actionable: null },
+    'install_extension':         { group: 'VS Code core', actionable: null },
+    'resolve_memory_file_uri':   { group: 'VS Code core', actionable: null },
+    'run_vscode_command':        { group: 'VS Code core', actionable: null },
+    'terminal_last_command':     { group: 'VS Code core', actionable: null },
+    'terminal_selection':        { group: 'VS Code core', actionable: null },
+    'testFailure':               { group: 'VS Code core', actionable: null },
+    'vscode_searchExtensions_internal': { group: 'VS Code core', actionable: null },
+};
+
+/**
+ * Classifies a tool name into a group label and actionable hint.
+ * MCP tools are auto-grouped by server name (mcp_<server>_<tool>).
+ * Built-in tools are looked up in TOOL_GROUPS; unknowns fall to 'VS Code core'.
+ *
+ * @param {string} name - Tool name from availableDeferredTools.
+ * @returns {{ group: string, actionable: string|null, isMcp: boolean }}
+ */
+function classifyTool(name) {
+    if (name.startsWith('mcp_')) {
+        const rest = name.slice(4);
+        const idx = rest.indexOf('_');
+        const server = idx >= 0 ? rest.slice(0, idx) : rest;
+        return { group: 'MCP: ' + server, actionable: 'Disable "' + server + '" MCP server', isMcp: true };
+    }
+    const entry = TOOL_GROUPS[name];
+    return {
+        group: entry ? entry.group : 'VS Code core',
+        actionable: entry ? entry.actionable : null,
+        isMcp: false
+    };
+}
+
 /** How long (ms) to cache the list of today's session files before rescanning. */
 const FILE_LIST_CACHE_TTL_MS = 60_000;
 
@@ -44,6 +135,14 @@ let todayRequests = [];
 
 /** Byte offsets per file — lets us read only new bytes, not the full file each poll. */
 let lastSeenSize = {};
+
+/** Session title per file (from kind:0 customTitle or kind:1 customTitle update).
+ *  Populated on the initial full parse; reused for incremental updates. */
+let fileSessionTitle = {};
+
+/** Workspace basename per file (from <workspace_info> in renderedGlobalContext).
+ *  Populated on the initial full parse; reused for incremental updates. */
+let fileWorkspace = {};
 
 /** Cached list of session file paths for today. Refreshed every FILE_LIST_CACHE_TTL_MS. */
 let cachedTodayFiles = [];
@@ -158,34 +257,183 @@ function parseRequests(filePath, fromByte = 0, fallbackTime = null) {
 
         const lines = buf.toString('utf8').split('\n').filter(Boolean);
 
-        // First pass: collect kind:0 session header messages (and their timestamps) in
-        // file order. These carry the raw user message text and optionally the request
-        // time for each turn. Pushed unconditionally (null slots preserved) so that
-        // kindZeroMessages[i] and kindZeroTimes[i] stay in sync with billingEventIndex.
-        // Field paths are best-effort assumptions; silently ignored if wrong.
+        // Pre-pass A: extract session title from this file's chunk.
+        // Only needed on the initial full parse (fromByte === 0); incremental chunks
+        // won't contain kind:1 customTitle updates (they appear at the top of the file).
+        // Two patterns observed in the wild:
+        //   - kind:0 snapshot header: j.v.customTitle (string)
+        //   - kind:1 live update:     {"kind":1,"k":["customTitle"],"v":"…"}
+        // We scan all lines and keep the last match so a kind:1 update wins over kind:0.
+        if (fromByte === 0) {
+            let title = '';
+            for (const rawLine of lines) {
+                if (!rawLine.includes('"customTitle"')) continue;
+                try {
+                    const j = JSON.parse(rawLine);
+                    if (j?.kind === 0 && typeof j?.v?.customTitle === 'string') {
+                        title = j.v.customTitle;
+                    } else if (j?.kind === 1 && j?.k?.[0] === 'customTitle' && typeof j?.v === 'string') {
+                        title = j.v;
+                    }
+                } catch { /* skip */ }
+            }
+            fileSessionTitle[filePath] = title;
+        }
+
+        // Pre-pass B: extract workspace basename from the first billing event's
+        // renderedGlobalContext. Only needed on the initial full parse.
+        // Three JSONL schema variants observed:
+        //   1. Synthetic/expanded per-request:  j.v.metadata.renderedGlobalContext
+        //   2. Snapshot kind:0 with requests[]: j.v.requests[i].result.metadata.renderedGlobalContext
+        //   3. Live kind:2 with v as array:     j.v[i].result.metadata.renderedGlobalContext
+        if (fromByte === 0 && !fileWorkspace[filePath]) {
+            for (const rawLine of lines) {
+                if (!rawLine.includes('workspace_info') || !rawLine.includes('promptTokens')) continue;
+                try {
+                    const j = JSON.parse(rawLine);
+                    let gc =
+                        // Variant 1: synthetic per-request or already-expanded
+                        j?.v?.metadata?.renderedGlobalContext
+                        // Variant 2: snapshot kind:0 with requests array
+                        ?? (() => { if (!Array.isArray(j?.v?.requests)) return undefined;
+                                    for (const req of j.v.requests) { const g = req?.result?.metadata?.renderedGlobalContext; if (g) return g; } })()
+                        // Variant 3: kind:2 where j.v is an array of updates
+                        ?? (() => { if (!Array.isArray(j?.v)) return undefined;
+                                    for (const req of j.v) { const g = req?.result?.metadata?.renderedGlobalContext; if (g) return g; } })();
+                    if (!gc) continue;
+                    const gb = gc.map(x => x?.text || '').join('\n');
+                    const wsMatch = gb.match(/<workspace_info>[\s\S]*?-\s+([^\n\\]+)/);
+                    if (wsMatch) {
+                        fileWorkspace[filePath] = path.basename(wsMatch[1].trim());
+                        break;
+                    }
+                } catch { /* skip */ }
+            }
+        }
+
+        // Normalize JSONL lines: expand session-header (kind:0 with embedded requests)
+        // and kind:2 update lines into synthetic per-request standard-format lines so
+        // that both the first pass (kindZeroMessages) and second pass (billing events)
+        // treat every billing entry uniformly. The original session-header / kind:2 lines
+        // are replaced — not duplicated — to avoid double-counting or index skew.
+        //
+        // IMPORTANT: kind:0 session-header expansion is only done when there are NO kind:2
+        // billing lines in the file. In live/ongoing sessions VS Code writes both a kind:0
+        // checkpoint (containing all prior requests) AND kind:2 per-request updates.
+        // Expanding both would double-count every billing event. For snapshot-only files
+        // (e.g. sessions written entirely as kind:0) there are no kind:2 billing lines,
+        // so expansion is the only way to extract billing data.
+        const hasKind2Billing = lines.some(line => {
+            if (!line.includes('"kind"') || !line.includes('promptTokens')) return false;
+            try {
+                const j = JSON.parse(line);
+                return j?.kind === 2 && Array.isArray(j?.v) &&
+                       j.v.some(r => r?.result?.metadata?.promptTokens);
+            } catch { return false; }
+        });
+
+        const expandedLines = [];
+        for (const rawLine of lines) {
+            try {
+                if (!rawLine.includes('"kind"')) { expandedLines.push(rawLine); continue; }
+                const jl = JSON.parse(rawLine);
+                if (!hasKind2Billing && jl?.kind === 0 && Array.isArray(jl?.v?.requests) &&
+                        jl.v.requests.some(r => r?.result?.metadata?.promptTokens)) {
+                    // Snapshot-only session-header: replace with one synthetic line per turn.
+                    for (const req of jl.v.requests) {
+                        if (!req?.result?.metadata?.promptTokens) continue;
+                        expandedLines.push(JSON.stringify({
+                            kind: 0,
+                            v: { ...req.result, requestTime: req.timestamp ?? req.timeSpentWaiting,
+                                 message: req.message, variableData: req.variableData }
+                        }));
+                    }
+                } else if (jl?.kind === 2 && Array.isArray(jl?.v) &&
+                        jl.v.some(r => r?.result?.metadata?.promptTokens)) {
+                    // kind:2 update: replace with one synthetic per-request line per turn.
+                    for (const req of jl.v) {
+                        if (!req?.result?.metadata?.promptTokens) continue;
+                        expandedLines.push(JSON.stringify({
+                            kind: 0,
+                            v: { ...req.result, requestTime: req.timestamp,
+                                 message: req.message, variableData: req.variableData }
+                        }));
+                    }
+                } else {
+                    expandedLines.push(rawLine);
+                }
+            } catch {
+                expandedLines.push(rawLine);
+            }
+        }
+
+        // First pass: collect kind:0 session header messages, timestamps, and variableData
+        // in file order. Handles two formats:
+        //   - Session-header: one kind:0 line with v.requests[] containing all turns
+        //   - Per-request: one kind:0 line per turn
+        // All three arrays stay in sync with billingEventIndex.
         const kindZeroMessages = [];
         const kindZeroTimes = [];
-        for (const line of lines) {
+        const kindZeroVariables = []; // promptFile/workspace variables per request turn
+        for (const line of expandedLines) {
             try {
                 if (!line.includes('"kind"')) continue;
                 const j = JSON.parse(line);
                 const kind = j?.kind ?? j?.v?.kind;
                 if (kind !== 0) continue;
-                const text = j?.message?.text
-                    ?? j?.v?.message?.text
-                    ?? j?.messages?.[0]?.text
-                    ?? j?.v?.messages?.[0]?.text
-                    ?? null;
-                kindZeroMessages.push(text ? String(text).trim().substring(0, 60) : null);
-                const rawT = j?.v?.requestTime ?? j?.v?.timestamp ?? j?.v?.time ?? j?.v?.createdAt
-                    ?? j?.requestTime ?? j?.timestamp ?? j?.ts ?? j?.time ?? j?.createdAt ?? null;
-                kindZeroTimes.push(rawT ? new Date(rawT) : null);
+                if (!hasKind2Billing && Array.isArray(j?.v?.requests)) {
+                    // Session-header format: one record containing all requests
+                    for (const req of j.v.requests) {
+                        const text = req?.message?.text ?? null;
+                        kindZeroMessages.push(text ? String(text).replace(/\\n/g, ' ').replace(/\s+/g, ' ').trim().substring(0, 60) : null);
+                        const rawT = req?.timestamp ?? req?.timeSpentWaiting ?? null;
+                        kindZeroTimes.push(rawT ? new Date(rawT) : null);
+                        kindZeroVariables.push(req?.variableData?.variables ?? []);
+                    }
+                } else {
+                    // Per-request format: one kind:0 line per turn
+                    const text = j?.message?.text
+                        ?? j?.v?.message?.text
+                        ?? j?.messages?.[0]?.text
+                        ?? j?.v?.messages?.[0]?.text
+                        ?? null;
+                    kindZeroMessages.push(text ? String(text).replace(/\\n/g, ' ').replace(/\s+/g, ' ').trim().substring(0, 60) : null);
+                    const rawT = j?.v?.requestTime ?? j?.v?.timestamp ?? j?.v?.time ?? j?.v?.createdAt
+                        ?? j?.requestTime ?? j?.timestamp ?? j?.ts ?? j?.time ?? j?.createdAt ?? null;
+                    kindZeroTimes.push(rawT ? new Date(rawT) : null);
+                    kindZeroVariables.push(
+                        j?.v?.variableData?.variables ?? j?.variableData?.variables ?? []
+                    );
+                }
             } catch { /* skip malformed lines */ }
         }
 
         let billingEventIndex = 0;
 
-        for (const line of lines) {
+        // Second pre-scan: find the most complete tool list seen anywhere in the session.
+        // Tool schemas are loaded for EVERY turn, but <availableDeferredTools> only appears
+        // in some events and sometimes only lists deferred tools (not MCP / always-on tools).
+        // By finding the richest list once, we can apply it as a fallback to all other turns.
+        let sessionBestToolNames = [];
+        for (const line of expandedLines) {
+            if (!line.includes('promptTokens')) continue;
+            try {
+                const j = JSON.parse(line);
+                const meta = j?.v?.metadata;
+                if (!meta?.promptTokens) continue;
+                const gb = (meta.renderedGlobalContext || []).map(x => x?.text || '').join('\n');
+                const ub = (meta.renderedUserMessage   || []).map(x => x?.text || '').join('\n');
+                const m  = (gb || ub).match(/<availableDeferredTools>([\s\S]*?)<\/availableDeferredTools>/);
+                if (!m) continue;
+                let c = m[1];
+                if (!c.includes('\n') && c.includes('\\n')) c = c.replace(/\\n/g, '\n');
+                const names = c.trim().split('\n').map(l => l.trim()).filter(Boolean)
+                    .filter(l => !l.startsWith('Available'));
+                if (names.length > sessionBestToolNames.length) sessionBestToolNames = names;
+            } catch { /* skip */ }
+        }
+
+        for (const line of expandedLines) {
             try {
                 // Quick pre-filter — skip lines that can't be billing events.
                 if (!line.includes('promptTokens')) continue;
@@ -208,12 +456,21 @@ function parseRequests(filePath, fromByte = 0, fallbackTime = null) {
                 //   1. <userRequest> tag in renderedUserMessage (primary, most reliable)
                 //   2. kind:0 header message at the same billing-event index (fallback)
                 //   3. '(agent loop)' — internal automated turn with no real user message
-                const userMsgBlock = meta?.renderedUserMessage?.[0]?.text || '';
+                //
+                // renderedUserMessage is an array; real content may be at any index (not always [0]).
+                // Concatenate all non-empty text items to ensure we capture all XML sections.
+                const allUserMsgTexts = (meta?.renderedUserMessage || [])
+                    .map(item => item?.text || '')
+                    .filter(Boolean);
+                const userMsgBlock = allUserMsgTexts.join('\n');
                 const userRequestMatch = userMsgBlock.match(/<userRequest>\s*([\s\S]*?)\s*<\/userRequest>/);
                 let prompt;
                 let isAgentLoop = false;
                 if (userRequestMatch) {
-                    prompt = userRequestMatch[1].trim().substring(0, 60);
+                    prompt = userRequestMatch[1]
+                        .replace(/\\n/g, ' ')   // literal backslash-n sequences
+                        .replace(/\s+/g, ' ')    // collapse actual newlines / whitespace
+                        .trim().substring(0, 60);
                 } else if (kindZeroMessages[billingEventIndex] != null) {
                     prompt = kindZeroMessages[billingEventIndex];
                 } else {
@@ -226,35 +483,211 @@ function parseRequests(filePath, fromByte = 0, fallbackTime = null) {
                 const detailsAscii = details.replace(/[^\x00-\x7F]/g, '');
                 const creditsMatch = detailsAscii.match(/([\d.]+)\s*credits/i);
 
-                // Build context breakdown: each XML section in renderedUserMessage
-                // gets a { label, charCount } entry. Token estimates (charCount/4)
-                // and percentages are computed at render time, not stored here.
+                // Build context breakdown from both message fields.
+                // renderedGlobalContext = structural overhead (workspace, tools, memories) — fixed per turn.
+                // renderedUserMessage   = per-turn content (attachments, context, instructions, prompt).
+                // Tool JSON schemas are NOT in the JSONL — only names are listed.
+                // Schema token cost is estimated as: residual / toolCount × groupCount.
                 const breakdown = [];
-                const extractSection = (tag, label) => {
-                    const m = userMsgBlock.match(new RegExp(`<${tag}(?:[^>]*)>([\\s\\S]*?)<\\/${tag}>`, ''));
-                    if (m) breakdown.push({ label, charCount: m[1].length });
+                const globalMsgBlock = meta?.renderedGlobalContext?.[0]?.text || '';
+
+                // When renderedGlobalContext is absent (Variant B), structural sections are
+                // merged into renderedUserMessage. Track chars extracted from userMsgBlock for
+                // structural items so the per-turn remainder is computed correctly.
+                let structFromUserChars = 0;
+
+                const extractFrom = (block, tag, label, category) => {
+                    const m = block.match(new RegExp(`<${tag}(?:[^>]*)>([\\s\\S]*?)<\\/${tag}>`, ''));
+                    if (m) breakdown.push({ label, charCount: m[1].length, category });
                 };
-                // Named single-instance tags
-                extractSection('userRequest',          'Your prompt');
-                extractSection('workspace_info',       'Workspace tree');
-                extractSection('availableDeferredTools','Tool schemas (MCP)');
-                extractSection('editorContext',        'Open file / notebook');
-                extractSection('reminderInstructions', 'System instructions');
+
+                // Extract a structural section, preferring globalMsgBlock; when absent,
+                // fall back to userMsgBlock and track the consumed chars.
+                const extractStructural = (tag, label) => {
+                    if (globalMsgBlock) {
+                        extractFrom(globalMsgBlock, tag, label, 'structural');
+                    } else {
+                        const m = userMsgBlock.match(new RegExp(`<${tag}(?:[^>]*)>([\\s\\S]*?)<\\/${tag}>`, ''));
+                        if (m) {
+                            breakdown.push({ label, charCount: m[1].length, category: 'structural' });
+                            structFromUserChars += m[0].length; // full tag including tag overhead
+                        }
+                    }
+                };
+
+                // ── Structural sections ───────────────────────────────────────
+                extractStructural('environment_info', 'OS / environment');
+                extractStructural('workspace_info',   'Workspace tree');
+                extractStructural('userMemory',       'User memory');
+                extractStructural('sessionMemory',    'Session memory');
+                extractStructural('repoMemory',       'Repo memory');
+                extractStructural('modeInstructions', 'Mode instructions');
+                extractStructural('instructions',     'Skills / agents');
+
+                // ── renderedUserMessage sections (per-turn) ──────────────────
+                extractFrom(userMsgBlock, 'userRequest',         'Your prompt',        'prompt');
+                extractFrom(userMsgBlock, 'context',             'Date / context',     'per-turn');
+                extractFrom(userMsgBlock, 'editorContext',       'Open file / notebook', 'per-turn');
+                extractFrom(userMsgBlock, 'reminderInstructions','Reminder instructions', 'per-turn');
+
                 // Attachments — multiple per message, each with an id attribute
                 for (const am of userMsgBlock.matchAll(/<attachment\s+id="([^"]*)"[^>]*>([\s\S]*?)<\/attachment>/g)) {
-                    breakdown.push({ label: `File: ${am[1]}`, charCount: am[2].length });
+                    breakdown.push({ label: `File: ${am[1]}`, charCount: am[2].length, category: 'per-turn' });
                 }
                 // contentReferences array — auto-injected instruction files
                 if (Array.isArray(meta.contentReferences)) {
                     for (const ref of meta.contentReferences) {
                         const refLabel = ref.uri ?? ref.name ?? ref.path ?? JSON.stringify(ref);
-                        breakdown.push({ label: `Instructions: ${String(refLabel).split('/').pop()}`, charCount: JSON.stringify(ref).length });
+                        breakdown.push({ label: `Instructions: ${String(refLabel).split('/').pop()}`, charCount: JSON.stringify(ref).length, category: 'per-turn' });
                     }
                 }
-                // Remainder — chars not accounted for by tagged sections
-                const taggedChars = breakdown.reduce((s, b) => s + b.charCount, 0);
-                const remainder = userMsgBlock.length - taggedChars;
-                if (remainder > 50) breakdown.push({ label: 'Other / untagged', charCount: remainder });
+                // Auto-attached prompt/instruction files from variableData (kind:0).
+                for (const variable of (kindZeroVariables[billingEventIndex] ?? [])) {
+                    if (variable?.kind === 'promptFile') {
+                        const name = String(variable?.name ?? '').replace(/^prompt:/, '');
+                        breakdown.push({ label: `Auto-instructions: ${name}`, charCount: 0, category: 'structural', inResidual: true });
+                    }
+                }
+
+                // ── Tool schema estimation ────────────────────────────────────
+                // Full tool JSON schemas are in the API tools[] payload but are NOT written
+                // to the JSONL. We use two sources to estimate:
+                //   Source A (preferred): <availableDeferredTools> in renderedGlobalContext
+                //                        gives the deferred-tool name list with accurate count.
+                //   Source B (fallback):  toolCallRounds[].toolCalls gives the tools actually
+                //                        CALLED this turn. We use TOOL_GROUPS to expand each
+                //                        called tool to its full group size (all group tools are
+                //                        always loaded when any one of them is called), and
+                //                        apply a calibrated 141 tokens/schema constant.
+                //   When neither source provides data: schemaDataAvailable = false, show —.
+
+                // Search both blocks: when globalMsgBlock is absent, availableDeferredTools
+                // is embedded in userMsgBlock (Variant B / merged format).
+                const toolsSearchBlock = globalMsgBlock || userMsgBlock;
+                const toolsBlockM = toolsSearchBlock.match(/<availableDeferredTools>([\s\S]*?)<\/availableDeferredTools>/);
+                let toolNames = [];
+                let useCalibrated = false; // true when using Source B (fixed tok/schema constant)
+
+                if (toolsBlockM) {
+                    // Source A: extract names from the XML block.
+                    // Some JSONL events store tool names with literal \n (double-encoded)
+                    // instead of real newlines — unescape before splitting.
+                    let toolContent = toolsBlockM[1];
+                    if (!toolContent.includes('\n') && toolContent.includes('\\n')) {
+                        toolContent = toolContent.replace(/\\n/g, '\n');
+                    }
+                    toolNames = toolContent.trim().split('\n')
+                        .map(l => l.trim()).filter(Boolean)
+                        .filter(l => !l.startsWith('Available'));
+                    useCalibrated = toolNames.length < 3; // too few names = degraded format
+                } else if (Array.isArray(meta.toolCallRounds) && meta.toolCallRounds.length) {
+                    // Source B: called tools only — known subset
+                    const calledNames = [...new Set(
+                        meta.toolCallRounds
+                            .flatMap(r => (r.toolCalls || []).map(tc => tc.name || tc.function?.name))
+                            .filter(Boolean)
+                    )];
+                    toolNames = calledNames;
+                    useCalibrated = true;
+                }
+
+                // Session-level fallback: if we couldn't find MCP / extension tools
+                // for this turn (they're loaded every turn but only appear in some events),
+                // substitute the best tool list seen anywhere in this session.
+                // This ensures MCP schemas are counted even on turns that only called
+                // VS Code core tools (read_file, grep_search, etc.).
+                const hasMcp = toolNames.some(n => n.startsWith('mcp_'));
+                if (!hasMcp && sessionBestToolNames.length > toolNames.length) {
+                    toolNames = sessionBestToolNames;
+                    useCalibrated = true; // calibrated constant; mark as session estimate
+                }
+
+                const schemaDataAvailable = toolNames.length > 0;
+
+                // Always use calibrated constant — dividing schemaResidual by tool count
+                // inflates per-tool estimates on turns beyond turn 1 because the residual
+                // also includes accumulated conversation history.
+                const TOK_PER_SCHEMA = 141;
+                const tokPerTool = TOK_PER_SCHEMA;
+
+                // Group tools by classifier and accumulate per-group counts.
+                // For Source B: expand each called tool to its full TOOL_GROUPS group size
+                // (all tools in a group are loaded whenever any one of them appears).
+                const toolGroupMap = {}; // { groupLabel: { count, actionable, isMcp } }
+                if (useCalibrated) {
+                    // Source B: group by name, then use the full known group size as count
+                    const seenGroups = new Set();
+                    for (const tname of toolNames) {
+                        const { group, actionable, isMcp } = classifyTool(tname);
+                        if (!seenGroups.has(group)) {
+                            seenGroups.add(group);
+                            // Full group size: count all entries in TOOL_GROUPS for this group
+                            const fullCount = Object.values(TOOL_GROUPS).filter(v => v && v.group === group).length || 1;
+                            toolGroupMap[group] = { count: fullCount, actionable, isMcp };
+                        }
+                    }
+                } else {
+                    for (const tname of toolNames) {
+                        const { group, actionable, isMcp } = classifyTool(tname);
+                        if (!toolGroupMap[group]) toolGroupMap[group] = { count: 0, actionable, isMcp };
+                        toolGroupMap[group].count++;
+                    }
+                }
+                // Sort: irreducible (VS Code core) last, MCP servers first by size
+                const toolGroupEntries = Object.entries(toolGroupMap).sort((a, b) => {
+                    if (a[0] === 'VS Code core') return 1;
+                    if (b[0] === 'VS Code core') return -1;
+                    return b[1].count - a[1].count;
+                });
+                let reducibleTokens = 0;
+                for (const [grp, { count, actionable, isMcp }] of toolGroupEntries) {
+                    const estTokens = Math.round(tokPerTool * count);
+                    breakdown.push({
+                        label: `${grp} (${count} tools)`,
+                        charCount: estTokens * 4,
+                        category: 'schema',
+                        actionable,
+                        estimated: true,
+                        estimatedFromCalls: useCalibrated,
+                        isMcp
+                    });
+                    if (actionable) reducibleTokens += estTokens;
+                }
+
+                // ── Remainder of userMsgBlock not accounted for by tagged sections ──
+                // Subtract structural chars extracted from userMsgBlock to avoid double-counting.
+                const taggedUserChars = breakdown
+                    .filter(b => b.category === 'prompt' || b.category === 'per-turn')
+                    .reduce((s, b) => s + b.charCount, 0);
+                const userRemainder = userMsgBlock.length - taggedUserChars - structFromUserChars;
+                if (userRemainder > 50) breakdown.push({ label: 'Other / untagged', charCount: userRemainder, category: 'per-turn' });
+
+                // ── Residual (always-on tool schemas ± conversation history) ──────────────
+                // After all tracked sections + estimated deferred-tool schema cost, the
+                // remaining tokens come from:
+                //   • Always-on tool schemas (read_file, grep_search, run_in_terminal, etc.)
+                //     — these JSON schemas are NOT written to the JSONL, so we can never
+                //     extract them directly. They are present on EVERY turn.
+                //   • Accumulated conversation history — prior turns replayed in API messages[].
+                //     Grows with each new turn; zero on the very first turn of a session.
+                // When fromByte === 0 we read from file start, so billingEventIndex is the
+                // absolute turn index within this session. Turn 0 has no prior history, so
+                // the entire residual is always-on tool schemas on a fresh session.
+                const totalAccountedTokens = Math.round(
+                    breakdown.reduce((s, b) => s + (b.inResidual ? 0 : b.charCount), 0) / 4
+                );
+                const historyTokens = Math.max(0, meta.promptTokens - totalAccountedTokens);
+                if (historyTokens > Math.round(meta.promptTokens * 0.05)) {
+                    const isAbsoluteFirstTurn = fromByte === 0 && billingEventIndex === 0;
+                    breakdown.push({
+                        label: isAbsoluteFirstTurn
+                            ? 'Always-on tool schemas (not in logs)'
+                            : 'Always-on tool schemas + prior turns',
+                        charCount: historyTokens * 4,
+                        category: isAbsoluteFirstTurn ? 'schema' : 'history',
+                        estimated: true
+                    });
+                }
 
                 requests.push({
                     time,
@@ -265,7 +698,11 @@ function parseRequests(filePath, fromByte = 0, fallbackTime = null) {
                     outputTokens: meta.outputTokens,
                     credits: creditsMatch ? parseFloat(creditsMatch[1]) : null,
                     creditsLabel: detailsAscii.replace(/\s+/g, ' ').trim(),
-                    breakdown
+                    breakdown,
+                    reducibleTokens,
+                    schemaDataAvailable,
+                    sessionTitle: fileSessionTitle[filePath] || '',
+                    workspace: fileWorkspace[filePath] || ''
                 });
 
                 billingEventIndex++;
@@ -330,6 +767,8 @@ function buildGroups(requests) {
 function loadTodayHistory() {
     todayRequests = [];
     lastSeenSize = {};  // Prunes stale byte-offset entries from the previous day.
+    fileSessionTitle = {};
+    fileWorkspace = {};
     nextSeq = 0;
     currentDay = new Date().toDateString();
     selectedDateStr = new Date().toISOString().split('T')[0];
@@ -361,6 +800,8 @@ function loadHistoryForDate(dateStr) {
     const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
     todayRequests = [];
     lastSeenSize = {};
+    fileSessionTitle = {};
+    fileWorkspace = {};
     nextSeq = 0;
     const files = [];
     try {
@@ -473,15 +914,20 @@ function renderPanel() {
     // them in time, so reversing after grouping keeps children with their parent.
     const groups = buildGroups([...todayRequests]).reverse();
 
-    // Helper: compute HIST% cell HTML for a single request row.
-    // histPct = (billed promptTokens - estimated tagged chars/4) / promptTokens.
-    // Represents conversation history (prior turns) as % of total input context.
-    const histCellHtml = (r) => {
-        const te = Math.round((r.breakdown || []).reduce((s, b) => s + b.charCount, 0) / 4);
-        const hp = r.promptTokens > 0 ? (r.promptTokens - te) / r.promptTokens * 100 : 0;
-        const cls = hp >= 90 ? 'hist-high' : hp >= 60 ? 'hist-mid' : 'hist-low';
-        const warn = hp >= 90 ? '<span title="Conversation history &gt;90% of context \u2014 start a new chat to reduce costs.">\u26a0</span>\u202f' : '';
-        return `<td class="hist ${cls}">${warn}${hp.toFixed(1)}%</td>`;
+    // Helper: compute REDUCIBLE% cell HTML for a single request row.
+    // rp = reducibleTokens / promptTokens — fraction of input that could be
+    // eliminated by disabling unused MCP servers / extensions.
+    const reducibleCellHtml = (r) => {
+        if (!r.promptTokens) return `<td class="reducible red-low">—</td>`;
+        if (!r.schemaDataAvailable) {
+            return `<td class="reducible red-low" title="Schema data not in JSONL for this session. Open breakdown for per-turn sections.">—</td>`;
+        }
+        const rp = r.promptTokens > 0 ? (r.reducibleTokens || 0) / r.promptTokens * 100 : 0;
+        const cls = rp >= 60 ? 'red-high' : rp >= 30 ? 'red-mid' : 'red-low';
+        const warn = rp >= 60
+            ? `<span title="⚠ ${rp.toFixed(1)}% of input tokens are from tools/extensions you could disable — open context breakdown for details.">\u26a0</span>\u202f`
+            : '';
+        return `<td class="reducible ${cls}">${warn}${rp.toFixed(1)}%</td>`;
     };
 
     const rows = groups.map(({ leader, children }) => {
@@ -500,12 +946,14 @@ function renderPanel() {
             <td class="seq">#${leader.seq + 1}</td>
             <td class="time">${timeStr}</td>
             <td class="prompt" title="${safePrompt}">${promptDisplay}</td>
+            <td class="session" title="${escapeHtml(leader.sessionTitle)}">${escapeHtml(leader.sessionTitle.substring(0, 40))}${leader.sessionTitle.length > 40 ? '…' : ''}</td>
+            <td class="workspace">${escapeHtml(leader.workspace)}</td>
             <td class="model">${escapeHtml(leader.model)}</td>
             <td class="num">${leader.promptTokens.toLocaleString()}</td>
             <td class="num">${leader.outputTokens.toLocaleString()}</td>
             <td class="ratio">${ratio}x</td>
             <td class="credits ${creditClass}">${creditsStr}</td>
-            ${histCellHtml(leader)}
+            ${reducibleCellHtml(leader)}
         </tr>`;
         }
 
@@ -523,12 +971,14 @@ function renderPanel() {
             <td class="seq">#${leader.seq + 1}</td>
             <td class="time">${timeStr}</td>
             <td class="prompt" title="${safePrompt}"><span class="toggle" data-gid="${gid}">▶</span> ${promptDisplay} <span class="badge">${all.length} calls</span></td>
+            <td class="session" title="${escapeHtml(leader.sessionTitle)}">${escapeHtml(leader.sessionTitle.substring(0, 40))}${leader.sessionTitle.length > 40 ? '…' : ''}</td>
+            <td class="workspace">${escapeHtml(leader.workspace)}</td>
             <td class="model">${escapeHtml(leader.model)}</td>
             <td class="num">${grpIn.toLocaleString()}</td>
             <td class="num">${grpOut.toLocaleString()}</td>
             <td class="ratio">${grpRatio}x</td>
             <td class="credits ${grpCreditClass}">${grpCreditsStr}</td>
-            ${histCellHtml(leader)}
+            ${reducibleCellHtml(leader)}
         </tr>`;
 
         const childRows = children.map(c => {
@@ -542,12 +992,14 @@ function renderPanel() {
             <td class="seq">#${c.seq + 1}</td>
             <td class="time">${cTime}</td>
             <td class="prompt"><span class="indent">↳</span> <em>(agent loop)</em></td>
+            <td class="session" title="${escapeHtml(c.sessionTitle)}">${escapeHtml(c.sessionTitle.substring(0, 40))}${c.sessionTitle.length > 40 ? '…' : ''}</td>
+            <td class="workspace">${escapeHtml(c.workspace)}</td>
             <td class="model">${escapeHtml(c.model)}</td>
             <td class="num">${c.promptTokens.toLocaleString()}</td>
             <td class="num">${c.outputTokens.toLocaleString()}</td>
             <td class="ratio">${cRatio}x</td>
             <td class="credits ${cCreditClass}">${cCreditsStr}</td>
-            ${histCellHtml(c)}
+            ${reducibleCellHtml(c)}
         </tr>`;
         }).join('');
 
@@ -613,6 +1065,8 @@ function renderPanel() {
   tr.bk-red { background: rgba(244,67,54,0.14); }
   tr.bk-history td:first-child { color: var(--vscode-descriptionForeground); }
   tr.bk-history { border-top: 1px dashed var(--vscode-editorWidget-border, #666); }
+  tr.bk-residual-hint td { color: var(--vscode-descriptionForeground); font-style: italic; }
+  .bk-residual-note { font-size: 0.85em; opacity: 0.7; text-align: left !important; padding-left: 0.5em; }
   .bk-footer { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 8px; border-top: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.2)); padding-top: 6px; }
   th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
   th.sortable:hover { color: var(--vscode-editor-foreground); }
@@ -621,6 +1075,17 @@ function renderPanel() {
   td.hist-low { color: #4caf50; }
   td.hist-mid { color: #ff9800; }
   td.hist-high { color: #f44336; font-weight: 600; }
+  td.reducible { font-family: monospace; text-align: right; font-size: 11px; white-space: nowrap; }
+  td.red-low  { color: #4caf50; }
+  td.red-mid  { color: #ff9800; }
+  td.red-high { color: #f44336; font-weight: 600; }
+  td.session { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--vscode-descriptionForeground); }
+  td.workspace { font-size: 11px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+  /* Context breakdown panel — sections and new rows */
+  tr.bk-section-header td { background: var(--vscode-editorGroupHeader-tabsBackground, rgba(128,128,128,0.12)); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; padding: 4px 8px; color: var(--vscode-descriptionForeground); }
+  tr.bk-estimated td:first-child { font-style: italic; color: var(--vscode-descriptionForeground); }
+  .bk-lever { display: block; font-size: 10px; color: var(--vscode-descriptionForeground); margin-top: 1px; }
+  .bk-savings-callout { margin-top: 10px; padding: 8px 12px; background: var(--vscode-editor-infoBackground, rgba(30,120,200,0.12)); border-left: 3px solid var(--vscode-editorInfo-foreground, #4fc3f7); border-radius: 3px; font-size: 12px; line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -648,12 +1113,12 @@ ${todayRequests.length === 0 ? `<div class="empty">No Copilot prompts recorded $
   <thead><tr>
     <th class="sortable" onclick="sortBy('seq')"># <span class="sort-ind" id="si-seq"></span></th>
     <th class="sortable" onclick="sortBy('time')">Time <span class="sort-ind" id="si-time"></span></th>
-    <th>Prompt</th><th>Model</th>
+    <th>Prompt</th><th>Session</th><th>Workspace</th><th>Model</th>
     <th style="text-align:right">In</th>
     <th style="text-align:right">Out</th>
     <th style="text-align:right">Ratio</th>
     <th style="text-align:right">Credits</th>
-    <th style="text-align:right">Hist %</th>
+    <th style="text-align:right" title="Estimated % of input tokens from tools/extensions you could disable by turning off unused MCP servers or extensions">Reducible %</th>
   </tr></thead>
   <tbody>${rows}</tbody>
 </table>
@@ -663,11 +1128,12 @@ ${todayRequests.length === 0 ? `<div class="empty">No Copilot prompts recorded $
     <span class="bk-title">Context breakdown &mdash; <span id="bk-seq"></span></span>
     <button class="bk-close" onclick="closeBreakdown()">&#x2715;</button>
   </div>
-  <div class="bk-note">Token estimates are approximate (chars &divide; 4). Click any row to inspect its context.</div>
+  <div class="bk-note">Token estimates are approximate (chars &divide; 4). <em>~</em> prefix = estimated from schema residual.</div>
   <table id="bk-table">
     <thead><tr><th>Section</th><th style="text-align:right">Est. tokens</th><th style="text-align:right">% of input</th><th>Usage</th></tr></thead>
     <tbody id="bk-body"></tbody>
   </table>
+  <div id="bk-savings"></div>
   <div class="bk-footer" id="bk-footer"></div>
 </div>`}
 <script>
@@ -726,34 +1192,85 @@ function showBreakdown(seq, promptTokens) {
         return;
     }
     document.getElementById('bk-seq').textContent = '#' + (seq + 1);
-    var totalEst = 0;
-    var bodyHtml = items.map(function(item) {
+
+    // Partition items into sections
+    var structural = items.filter(function(it) { return it.category === 'structural' && !it.inResidual; });
+    var perTurn    = items.filter(function(it) { return it.category === 'prompt' || it.category === 'per-turn'; });
+    var schemas    = items.filter(function(it) { return it.category === 'schema'; });
+    var history    = items.filter(function(it) { return it.category === 'history'; });
+    var inResidual = items.filter(function(it) { return it.inResidual; });
+
+    function escH(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function rowHtml(item) {
         var est = Math.round(item.charCount / 4);
-        totalEst += est;
         var pct = promptTokens > 0 ? (est / promptTokens * 100) : 0;
-        var cls = pct > 40 ? 'bk-red' : pct > 20 ? 'bk-amber' : '';
         var barPct = Math.min(pct, 100).toFixed(1);
-        return '<tr class="' + cls + '"><td>' + item.label + '</td>' +
+        var estCls = item.estimated ? ' bk-estimated' : '';
+        var colorCls = pct > 40 ? ' bk-red' : pct > 20 ? ' bk-amber' : '';
+        var lever = item.actionable
+            ? '<span class="bk-lever">→ ' + escH(item.actionable) + '</span>'
+            : '';
+        var prefix = item.estimated
+            ? '<em title="' + (item.estimatedFromCalls ? 'Estimated from tool calls in this turn (×141 tok/schema)' : 'Estimated from schema residual') + '">~</em>&thinsp;'
+            : '';
+        return '<tr class="' + estCls + colorCls + '">' +
+            '<td>' + prefix + escH(item.label) + lever + '</td>' +
             '<td class="bk-num">' + est.toLocaleString() + '</td>' +
             '<td class="bk-pct">' + pct.toFixed(1) + '%</td>' +
             '<td class="bk-bar-cell"><div class="bk-bar-bg"><div class="bk-bar-fill" style="width:' + barPct + '%"></div></div></td></tr>';
-    }).join('');
-    // Conversation history: the gap between billed tokens and what renderedUserMessage accounts for.
-    // This is the dominant cost on long sessions — all prior turns sent to the model on every request.
-    var history = promptTokens - totalEst;
-    if (history > 0) {
-        var histPct = (history / promptTokens * 100);
-        var histCls = histPct > 40 ? 'bk-red' : histPct > 20 ? 'bk-amber' : '';
-        var histBarPct = Math.min(histPct, 100).toFixed(1);
-        bodyHtml += '<tr class="' + histCls + ' bk-history"><td><em>Conversation history (prior turns)</em></td>' +
-            '<td class="bk-num">' + history.toLocaleString() + '</td>' +
-            '<td class="bk-pct">' + histPct.toFixed(1) + '%</td>' +
-            '<td class="bk-bar-cell"><div class="bk-bar-bg"><div class="bk-bar-fill" style="width:' + histBarPct + '%"></div></div></td></tr>';
     }
-    document.getElementById('bk-body').innerHTML = bodyHtml;
+
+    function sectionHtml(title, sectionItems, extraRows) {
+        if (!sectionItems.length && !extraRows) return '';
+        var rows = sectionItems.map(rowHtml).join('') + (extraRows || '');
+        return '<tr class="bk-section-header"><td colspan="4">' + title + '</td></tr>' + rows;
+    }
+
+    // Structural section
+    var structRows = sectionHtml('📐 Structural (fixed per turn)', structural,
+        // list inResidual items as hints at the bottom of structural section
+        inResidual.map(function(it) {
+            return '<tr class="bk-residual-hint"><td><em>' + it.label + '</em></td>' +
+                '<td class="bk-num bk-residual-note" colspan="3">size in residual ↓</td></tr>';
+        }).join('')
+    );
+
+    // Per-turn section
+    var perTurnRows = sectionHtml('💬 Per-turn content', perTurn);
+
+    // Schema section
+    var schemaRows = sectionHtml('🔧 Tool schemas (estimated)', schemas);
+
+    // Savings callout
+    var actionableSchemas = schemas.filter(function(it) { return it.actionable; });
+    var calloutHtml = '';
+    if (actionableSchemas.length) {
+        var savingsTokens = actionableSchemas.reduce(function(s, it) { return s + Math.round(it.charCount / 4); }, 0);
+        var savingsPct = promptTokens > 0 ? (savingsTokens / promptTokens * 100) : 0;
+        var tipParts = actionableSchemas.slice(0, 3).map(function(it) {
+            var pct = (Math.round(it.charCount / 4) / promptTokens * 100).toFixed(1);
+            return '<strong>' + escH(it.label) + '</strong> (' + pct + '%)';
+        });
+        calloutHtml = '<div class="bk-savings-callout">💡 You could save ~<strong>' +
+            savingsTokens.toLocaleString() + ' tokens/turn (' + savingsPct.toFixed(1) +
+            '%)</strong> by disabling unused tools/extensions: ' + tipParts.join(', ') +
+            (actionableSchemas.length > 3 ? ', …' : '') + '.</div>';
+    }
+
+    var historyRows = sectionHtml('📜 Conversation history (prior turns)', history);
+    var fromCalls = items.some(function(it) { return it.estimatedFromCalls; });
+    document.getElementById('bk-body').innerHTML = structRows + perTurnRows + schemaRows + historyRows;
+    document.getElementById('bk-savings').innerHTML = calloutHtml;
     document.getElementById('bk-footer').textContent =
-        'The IN column (' + promptTokens.toLocaleString() + ' tokens) is the full context sent to the model. ' +
-        'Conversation history is billed tokens minus what renderedUserMessage accounts for (' + totalEst.toLocaleString() + ' tokens estimated).';
+        'IN = ' + promptTokens.toLocaleString() + ' tokens total. ' +
+        'Structural/per-turn sections: chars÷4 estimate. ' +
+        (fromCalls
+            ? 'Tool schemas: estimated from called tools × 141 tok/schema (schema list not in JSONL for this session). '
+            : 'Tool schemas: estimated from tool list × 141 tok/schema (±15%). ') +
+        'Always-on tool schemas (read_file, grep_search, etc.) are never in the JSONL — they appear as residual. Conversation history grows with each turn — start a new chat to reset.';
     document.getElementById('breakdown-panel').style.display = 'block';
 }
 function closeBreakdown() {

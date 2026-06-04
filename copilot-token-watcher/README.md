@@ -10,7 +10,7 @@ A lightweight, zero-dependency VS Code extension that monitors **GitHub Copilot 
 
 This folder contains the **full, inspectable source code** of the extension. You can read every file before packaging it into a `.vsix`:
 
-- `extension.js` — ~750 lines of vanilla JavaScript. Core logic: file watcher, parser, status bar, webview panel.
+- `extension.js` — ~300 lines of vanilla JavaScript. Core logic: file watcher, parser, status bar, webview panel.
 - `package.json` — VS Code extension manifest (activation events, commands, devDependencies).
 - `.vscodeignore` — Excludes build artefacts and editor settings from the final `.vsix`.
 - `README.md` — This file.
@@ -44,16 +44,14 @@ The extension runs in the **VS Code extension host on Windows**, so it correctly
 | Feature | Description |
 |---------|-------------|
 | **Status bar** (bottom-right) | Shows last prompt tokens in → out and credits in real time |
-| **Click to open history** | Full webview panel with the selected day's session breakdown |
-| **Date picker** | Pick any past day to browse its history; defaults to today. Selecting a different date loads and displays that day's requests. Live polling continues only when today is selected. |
+| **Click to open history** | Full webview panel with today's session breakdown |
 | **Summary cards** | Total prompts, tokens in/out, credits used, dollar cost |
-| **Per-prompt table** | `#` counter, time, prompt snippet, model, tokens in/out, ratio, credits (colour-coded), and `Hist %` |
-| **Sortable columns** | Click `#` or `Time` column headers to sort ascending/descending. Active direction shown with ▲/▼ indicator. Default: newest first by time. |
-| **Hist % column** | Shows what share of input tokens is conversation history (prior turns re-sent each call). Green (<60%), orange (≥60%), red + ⚠ (≥90%) — at ≥90% a tooltip suggests starting a new chat. |
-| **Agent loop grouping** | Consecutive internal agent-loop turns are collapsed under their parent user prompt. Click the `▶` row to expand/collapse. Combined totals and a call-count badge are shown on the group header. |
-| **Context breakdown panel** | Click any table row to open a sticky breakdown panel showing estimated token usage per XML section in the rendered prompt (`<userRequest>`, `<workspace_info>`, `<availableDeferredTools>`, file attachments, instructions, etc.). Rows are colour-coded amber (>20%) and red (>40%). |
-| **Conversation history row** | The breakdown panel includes a separate "Conversation history (prior turns)" row for the gap between billed tokens and what the tagged sections account for. This is typically the dominant cost on long sessions. |
+| **Per-prompt table** | Time, prompt snippet, **session title**, **workspace**, model, tokens, input/output ratio, credits (colour-coded) |
+| **Session & workspace columns** | Each row shows the VS Code chat session name (`customTitle`) and the workspace folder name, so multi-project days are easy to filter at a glance |
 | **Insight line** | % of tokens that were invisible context overhead vs. actual response |
+| **Context breakdown panel** | Click any row to see a per-section token estimate (prompt, attachments, tool schemas, conversation history) |
+| **Reducible% column** | Highlights how many input tokens could be saved by disabling unused MCP servers or extensions |
+| **Date picker** | Browse any day within the current month |
 | **Auto-refresh** | New prompts detected within 5 seconds without re-scanning entire files |
 
 ---
@@ -115,13 +113,9 @@ Open VS Code → Extensions view (`Ctrl+Shift+X`) → `…` menu → **Install f
 3. **Click** the status bar item to open the full history panel.
 
 The panel shows:
-- Summary cards (prompts, tokens in/out, credits, cost) — based on all turns including agent loops
+- Summary cards (prompts, tokens in/out, credits, cost)
 - An insight line explaining context overhead
-- A per-prompt table with colour-coded credit usage and `Hist %` column
-- Sortable `#` and `Time` columns — click headers to toggle asc/desc order
-- Agent loop turns grouped and collapsed under their parent prompt (click `▶` to expand)
-- **Context breakdown panel** — click any row to open a sticky panel showing estimated token distribution across prompt sections, plus a "Conversation history" row for prior-turn overhead
-- A **date picker** (top-right of the panel) to browse any past day's session history
+- A per-prompt table with colour-coded credit usage
 
 ---
 
@@ -129,16 +123,12 @@ The panel shows:
 
 | Limitation | Details |
 |---|---|
-| **Date picker** | Loads history for a selected past day. On non-today dates live polling is suspended to avoid overwriting the viewed data. |
 | **New thread detection delay** | When starting a brand-new conversation, a new `.jsonl` file is created. Detection happens on the next 5-second poll cycle, not instantly. |
 | **Encoding artifacts** | The `details` field from Copilot uses multi-byte characters (`•` shows as `â€¢`). Credits are parsed robustly via regex after stripping non-ASCII. |
 | **Windows-only runtime** | Reads from `%APPDATA%`. The extension installs on any OS, but will only display data when running on Windows. |
 | **File list cache TTL** | The list of today's session files is refreshed from disk at most once per minute (not every poll). A brand-new chat thread created within the last minute may be missed until the cache expires. |
 | **Midnight boundary** | State resets automatically when the calendar day changes (detected on the next poll cycle). The final few seconds before midnight may technically be attributed to the new day. |
-| **Timestamp accuracy** | Event times are resolved with a four-level fallback: (1) embedded JSONL field (`requestTime`, `timestamp`, `ts`, `time`, `createdAt` — tried on both `j.v.*` and top-level); (2) matching `kind:0` session header timestamp; (3) the session file's last-modified time (`mtime`) — applied to all records loaded at startup, so every row shows a real clock time rather than `--:--:--`; (4) `new Date()` at poll-detection time for records discovered while the extension is already running (accurate to ±5 s). The time column shows `--:--:--` only if all four sources fail. Prompt order is always guaranteed by the sequential `#` counter independently of timestamps. |
-| **Prompt text extraction** | The parser tries three sources in order: (1) `<userRequest>` tag in `renderedUserMessage`, (2) matching `kind:0` session header message, (3) labels the turn `(agent loop)` if no user text is found. The `kind:0` field paths are inferred from the Windows chatSessions format and may not match on all VS Code versions. |
-| **Breakdown token estimates** | The context breakdown panel estimates tokens as `charCount / 4`, which is an approximation. Actual tokenisation depends on the model's tokeniser and will differ. The "Conversation history" row is the remainder (billed tokens minus tagged-section estimates) and can be negative if estimates overshoot. |
-| **Agent loop grouping** | Grouping is purely positional — any billing event with no extractable user text that immediately follows a user prompt is treated as an agent loop. A misidentified row will appear as an `(agent loop)` child of the wrong group. |
+| **Timestamp accuracy** | Event times are read from `requestTime` or `timestamp` fields in the JSONL data. If neither is present, the extension falls back to the time the entry was parsed (typically within 5 seconds of the actual request). |
 
 ---
 
